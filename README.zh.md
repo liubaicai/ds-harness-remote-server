@@ -38,6 +38,21 @@ Server 默认忽略 `X-Forwarded-For`，以 socket 对端地址作为登录限�
 
 账号鉴权接口 `DELETE /api/v1/account/devices/:id` 成功返回 `200 {"status":"deleted"}`，支持账号会话 cookie 或账号 bearer token，不接受设备 token 作为账号权限。删除会移除设备和对应 token、断开其活跃 WebSocket，并释放 256 台设备上限中的名额。已吊销的设备也可以删除（设备列表仍只展示活跃设备）。服务会保留最小的已删除 ID 标记，防止旧设备凭据冒名重新注册；重新配对需要创建新设备 ID，再完成配对。删除设备记录不会删除 Host 上的远端文件或数据。
 
+### 使用预构建镜像
+
+CI 会在测试通过后自动构建多架构镜像（amd64/arm64）并发布到 `ghcr.io/liubaicai/ds-harness-remote-server`：
+
+```bash
+docker run -d --name dsh-remote-server \
+  -e DSH_SERVER_ACCOUNT=you@example.com \
+  -e DSH_SERVER_PASSWORD=<12位以上密码> \
+  -e DSH_SERVER_PUBLIC_URL=https://remote.example.com \
+  -p 8080:8080 -v dsh-server-data:/data \
+  ghcr.io/liubaicai/ds-harness-remote-server:latest
+```
+
+标签规则：`latest` 和 `main` 跟随主干，`v*` 发布标签生成 `0.5.19`、`0.5` 这类语义化版本，另有 `sha-<短哈希>` 对应每次提交。在 Compose 中使用时，把 `server` 服务的 `build:` 块替换为 `image: ghcr.io/liubaicai/ds-harness-remote-server:<标签>`，其余配置不变。
+
 ## 本地运行
 
 需要 Node.js 22 与 pnpm 9.15.4。所有命令都在仓库根目录执行 —— 这里不再是 workspace，也没有 `apps/`、`packages/` 的层级：

@@ -38,6 +38,21 @@ The Server consults XFF only when the immediate socket peer is trusted, then wal
 
 The account-authenticated endpoint `DELETE /api/v1/account/devices/:id` returns `200 {"status":"deleted"}`. Authenticate with the account session cookie or account bearer token, not a device token. Deletion removes the device and its tokens, disconnects its active WebSocket, and frees a slot in the 256-device limit. Already-revoked devices can also be deleted (the device list only shows active devices). A minimal deleted-ID tombstone remains to prevent old device credentials from re-registering that identity: to pair the device again, create a new device ID and repeat pairing. Deletion does not erase remote files or data on the Host.
 
+### Prebuilt image
+
+CI builds multi-arch images (amd64/arm64) after the test suite passes and publishes them to `ghcr.io/liubaicai/ds-harness-remote-server`:
+
+```bash
+docker run -d --name dsh-remote-server \
+  -e DSH_SERVER_ACCOUNT=you@example.com \
+  -e DSH_SERVER_PASSWORD=<12+ characters> \
+  -e DSH_SERVER_PUBLIC_URL=https://remote.example.com \
+  -p 8080:8080 -v dsh-server-data:/data \
+  ghcr.io/liubaicai/ds-harness-remote-server:latest
+```
+
+Tags: `latest` and `main` track the default branch, `v*` releases produce semver tags (`0.5.19`, `0.5`), and `sha-<short>` pins a commit. To use it in Compose, replace the `server` service's `build:` block with `image: ghcr.io/liubaicai/ds-harness-remote-server:<tag>` and keep the rest as is.
+
 ## Local setup
 
 Requires Node.js 22 and pnpm 9.15.4. Everything runs from the repository root — there is no workspace, `apps/` or `packages/` layout any more:
