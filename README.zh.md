@@ -150,6 +150,31 @@ DSH_SERVER_TURN_SECRET=<共享密钥>
 
 `docker compose --profile turn up -d` 可在 Linux 主机上拉起内置 coturn（中继端口段需要 host 网络）。请先配置高强度、非空的 `DSH_SERVER_TURN_SECRET`：若未配置或为空，coturn 容器会在开启中继前退出。普通 `docker compose up -d` 不需要 TURN 密钥，可选 profile 不再阻塞普通启动。静态用户名/密码会透传给 Server 供外部 TURN 服务使用，但不能替代内置 profile 的共享密钥要求。Compose 也会保留显式空值 `DSH_SERVER_STUN_URLS=`。Docker Desktop 环境请在宿主机上单独运行 coturn。
 
+## 连接诊断、历史与质量统计
+
+登录管理页面，在“我的设备”下方打开“连接历史与质量”：
+
+- 查看连接建立、握手、通道切换和结束时间线，识别拒绝、离线、授权失效和协议错误。
+- 查看保留记录内的连接数、握手完成数、平均握手耗时、中继密文字节数和帧数，以及最后通道分布。
+- 使用“连接诊断”检查服务配置和设备状态；每条历史记录也有独立诊断入口。
+- 在诊断窗口下载 JSON 格式的脱敏诊断包，用于排障或反馈问题。
+
+**统计口径**：握手耗时是服务端观察到的连接请求至第二步加密握手的间隔，不等于业务请求耗时或业务成功。中继统计仅计入 WebSocket 发送回调成功的密文字节和帧数，不代表对端已收到；不含协议封装、直连及 TURN 流量。通道由设备上报，不是服务器主动测量的真实路径。心跳 RTT 仅表示服务器与单个设备之间的往返时间，不能当成客户端与 Host 的端到端延迟。现有客户端未上报端到端延迟、丢包率和直连吞吐，这些指标不会伪造或估算。
+
+**诊断范围**：使用当前服务配置、设备状态、连接时间线和启动时 STUN 探测结果，不在每次打开窗口时主动扫描网络。服务器的 STUN 可达性不能证明客户端可达；TURN 配置完整也不代表 TURN 中继已可用，未验证的项目会明确标注。
+
+**保留与隐私**：历史保存在 `DSH_SERVER_DATA_FILE` 后追加 `.connections.json` 的独立文件中，默认保留最近 7 天、最多 1,000 条记录，写入采用限频和原子替换，空闲时每小时清理过期记录。持续超过 7 天的活动连接可能不再出现在历史中，但不影响“活动连接”列表或实际连接。服务重启后不会将遗留连接误报为在线。历史从升级后开始采集，无法还原之前的连接。原始历史含设备 ID 和时间等元数据，应与账号数据一样保护；不保存业务内容、密文内容、SDP 或 ICE 候选地址。脱敏导出使用每次导出独立的匿名编号，并通过字段白名单排除账号、设备名、原始 ID、网络地址、凭证和自由文本。导出仍保留时间和统计信息，分享前请确认。
+
+以下接口仅接受账号会话 Cookie 或账号 Bearer Token，不接受设备令牌：
+
+| 接口 | 用途 |
+| --- | --- |
+| `GET /api/v1/account/connection-history?limit=20&offset=0` | 分页查询历史和保留范围 |
+| `GET /api/v1/account/connection-stats` | 保留记录统计与服务器到设备的心跳 RTT |
+| `GET /api/v1/account/diagnostics` | 服务连接诊断 |
+| `GET /api/v1/account/diagnostics?connectionId=<id>` | 单条连接诊断 |
+| `GET /api/v1/account/diagnostics/export` | 下载脱敏 JSON；也支持 `connectionId` 参数 |
+
 ## 与上游的差异
 
 | 位置 | 上游 | 本项目 |
@@ -179,7 +204,14 @@ compose.yaml        Server（以及可选的 coturn profile）
 
 ```bash
 pnpm test        # vitest run
+pnpm check       # 服务端与前端类型检查
+pnpm build
+node web/tests/observability.browser.mjs  # 可选：真实浏览器界面检查
 ```
+
+浏览器检查会启动独立的本地测试服务并使用模拟数据，覆盖分页、诊断、JSON 下载、浅色/深色与移动布局、空态、失败重试和登录过期。需要本机 Chromium、Chrome 或 Edge；可通过 `BROWSER_PATH` 指定浏览器可执行文件，不会修改正在运行的服务。截图输出到命令打印的临时目录。
+
+新增服务端测试覆盖历史保留与容量、重启恢复、事件数量限制、诊断鉴权和导出白名单。
 
 覆盖范围：账号/设备授权、凭据轮换/吊销/删除、可信代理与 XFF 防伪造（IPv4/IPv6）、Control 帧校验、真实 Noise IK 的端到端加密 Relay、中继授权与重放处理、WebRTC 协商代理（信令双向转发、未协商传输被拒、第三方注入被拒）、TURN 凭据签发、STUN 探测。Compose 回归测试会在安装 Docker Compose CLI 时渲染真实配置（不需要 Docker daemon），在有 POSIX shell 时执行缺少密钥的启动保护；工具不可用时跳过这些集成检查。
 

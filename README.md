@@ -150,6 +150,28 @@ Credentials follow the coturn REST convention — `username=<expiry>:<label>`, `
 
 `docker compose --profile turn up -d` starts the bundled coturn on a Linux host (it needs host networking for the relay port range). Set a strong, nonempty `DSH_SERVER_TURN_SECRET` first: the coturn container exits before starting the relay if the secret is missing or empty. Ordinary `docker compose up -d` does not require a TURN secret because the profile is optional. Static username/password credentials are passed through to the Server for an external TURN service; they do not replace the bundled profile's shared-secret requirement. An explicitly empty `DSH_SERVER_STUN_URLS=` is preserved in Compose too. On Docker Desktop run coturn on the host instead.
 
+## Connection diagnostics, history and quality
+
+The account device page now includes connection history and quality statistics, refreshing every 30 seconds. Open **Connection diagnostics** for service checks, or diagnose an individual history row for its stage/transport/end timeline. The dialog downloads a sanitized JSON diagnostic bundle.
+
+- History captures new connection attempts, handshake stages, reported transport changes, rejections and disconnect reasons. It cannot reconstruct connections from before this upgrade.
+- Statistics cover retained records: connection counts, completed handshakes, mean request-to-handshake-completion time, last reported transports, relay ciphertext bytes and frames.
+- Relay counters count ciphertext whose WebSocket send callback succeeded, not confirmed delivery; they exclude wire framing, direct-path traffic and TURN traffic. Handshake completion does not prove application success.
+- Heartbeat RTT is **server-to-device**, not client-to-Host end-to-end latency. Direct-path throughput, end-to-end RTT and packet loss are unavailable without client telemetry; no estimates are presented as measurements.
+- Diagnostics use configuration, device presence, connection events and the existing startup STUN probe. Opening diagnostics does not scan arbitrary targets. Server-side STUN reachability does not establish client reachability, and configured TURN credentials do not establish TURN availability.
+
+History is persisted beside the account data at `<DSH_SERVER_DATA_FILE>.connections.json`, bounded to 7 days and 1,000 records with throttled atomic writes and hourly idle cleanup. Connections active for more than 7 days can age out of history without affecting the live connections list or the connection itself. Recovered active records are marked interrupted rather than shown online after restart. Protect this file like account data: it contains device IDs and timing metadata, but no application payload, ciphertext content, SDP or ICE candidates. Diagnostic downloads use a strict field allowlist and fresh per-export anonymous identifiers, excluding account/device names, original IDs, addresses, credentials and free text. Timing and aggregate metadata remain in the bundle; review before sharing.
+
+All new endpoints require an account cookie or account Bearer token; device tokens cannot access them:
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /api/v1/account/connection-history?limit=20&offset=0` | Paginated retained history |
+| `GET /api/v1/account/connection-stats` | Retained-record statistics and server-to-device RTT |
+| `GET /api/v1/account/diagnostics` | Service diagnostics |
+| `GET /api/v1/account/diagnostics?connectionId=<id>` | Individual connection diagnostics |
+| `GET /api/v1/account/diagnostics/export` | Sanitized JSON attachment; also accepts `connectionId` |
+
 ## What differs from upstream
 
 | Area | Upstream | Here |
@@ -179,7 +201,14 @@ compose.yaml        Server (+ optional coturn profile)
 
 ```bash
 pnpm test        # vitest run
+pnpm check       # server and web type checks
+pnpm build
+node web/tests/observability.browser.mjs  # optional real-browser UI checks
 ```
+
+The browser check runs an isolated loopback fixture server with mock data, covering pagination, diagnostics, JSON download, light/dark themes, mobile layout, empty/error states and expired login. It requires local Chromium, Chrome or Edge; set `BROWSER_PATH` to override executable discovery. It does not modify the running service. Screenshots are written to the temporary directory printed by the command.
+
+Observability tests additionally cover retention/capacity, restart recovery, bounded event timelines, account-only authorization and diagnostic export allowlists.
 
 The suite covers account/device authorization, credential rotation, revocation and deletion, trusted-proxy/XFF anti-spoofing (IPv4/IPv6), Control-frame validation, end-to-end encrypted Relay (real Noise IK), relay authorization and replay handling, WebRTC brokering (signaling fan-out, unnegotiated transports, third-party injection), TURN credential minting, and the STUN probe. Compose regression tests additionally render configuration when the Docker Compose CLI is installed (no daemon needed), and execute the missing-secret guard when a POSIX shell is available; those integration checks are skipped when their tools are unavailable.
 

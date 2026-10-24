@@ -3,9 +3,10 @@ import type { Server } from 'node:http'
 import { WebSocket, WebSocketServer } from 'ws'
 import { createControlFrame, decodeControlFrame, encodeControlFrame, MAX_CONTROL_FRAME_BYTES, MAX_RELAY_FRAME_BYTES, type ControlFrame, type HelloPayload, type ConnectRequestPayload, type SecureHandshakePayload, type RelayPayload, type TransportSelectedPayload } from './protocol/index.js'
 import { ApiError, Store } from './store.js'
+import type { ConnectionHistory } from './connection-history.js'
 
 type TransportName = 'lan' | 'p2p' | 'turn' | 'relay'
-type Peer = { ws: WebSocket; id: string; role: 'host' | 'client'; capabilities: string[]; version: string; lastPong: number; nonce?: string }
+type Peer = { ws: WebSocket; id: string; role: 'host' | 'client'; capabilities: string[]; version: string; lastPong: number; nonce?: string; pingAt?: number; rttMs?: number; rttAt?: number }
 /** One live link as exposed to the account admin view. */
 export type LinkSummary = {
   connectionId: string
@@ -36,6 +37,7 @@ export interface GatewayOptions {
    * When false the Server behaves like a Relay-only deployment: `hello.ack`
    * reports `webrtcEnabled: false` and only `transport.relay` is negotiable.
    */
+  history?: ConnectionHistory
   webrtc?: boolean
   /** Advertised WebRTC negotiation budget before a peer falls back to Relay. */
   webrtcFallbackTimeoutMs?: number
@@ -91,7 +93,7 @@ const TRANSPORT_CAPABILITIES = ['transport.lan', 'transport.p2p', 'transport.tur
  * paths settle in well under a second on typical networks.
  */
 const DEFAULT_WEBRTC_FALLBACK_TIMEOUT_MS = 8_000
-function modernHost(version: string): boolean {
+export function modernHost(version: string): boolean {
   const match = /^v?(\d+)\.(\d+)\.(\d+)(?:\+.*)?$/.exec(version)
   if (!match) return false
   const [major, minor, patch] = match.slice(1).map(Number)
@@ -104,9 +106,11 @@ export class Gateway {
   private wss = new WebSocketServer({ noServer: true, maxPayload: MAX_RELAY_FRAME_BYTES, perMessageDeflate: false })
   private heartbeat: ReturnType<typeof setInterval>
   private readonly admission = new UnauthenticatedAdmission()
+  private readonly history?: ConnectionHistory
   private readonly webrtc: boolean
   readonly webrtcFallbackTimeoutMs: number
   constructor(server: Server, private store: Store, origin: string, options: GatewayOptions = {}) {
+    this.history = options.history
     this.webrtc = options.webrtc === true
     this.webrtcFallbackTimeoutMs = options.webrtcFallbackTimeoutMs ?? DEFAULT_WEBRTC_FALLBACK_TIMEOUT_MS
     store.onInvalidate = id => this.disconnect(id, 'AUTH_INVALID')
@@ -135,13 +139,14 @@ export class Gateway {
       for (const peer of this.peers.values()) {
         if (Date.now() - peer.lastPong > 75_000) { this.disconnect(peer.id, 'CONNECTION_FAILED'); continue }
         peer.nonce = randomUUID()
+        peer.pingAt = Date.now()
         this.send(peer, createControlFrame('ping', { nonce: peer.nonce }))
       }
       for (const link of this.links.values()) if (link.stage !== 'ready' && Date.now() - link.connectedAt > 30_000) this.drop(link, 'CONNECTION_FAILED')
     }, 25_000)
     this.heartbeat.unref()
   }
-  private send(peer: Peer, frame: ControlFrame): void {
+  private send(peer: Peer, frame: ControlFrame, forwarded?: () => void): void {
     if (peer.ws.readyState !== WebSocket.OPEN) return
     if (peer.ws.bufferedAmount > 4 * MAX_RELAY_FRAME_BYTES) { this.disconnect(peer.id, 'SLOW_CONSUMER'); return }
     // Encoding validates payloads and UTF-8 wire size before anything is sent.
@@ -149,6 +154,7 @@ export class Gateway {
     try {
       peer.ws.send(encodeControlFrame(frame), error => {
         if (error && this.peers.get(peer.id) === peer) this.disconnect(peer.id, 'CONNECTION_FAILED')
+        if (!error) forwarded?.()
       })
     } catch {
       if (this.peers.get(peer.id) === peer) this.disconnect(peer.id, 'CONNECTION_FAILED')
@@ -186,6 +192,7 @@ export class Gateway {
   }
   private drop(link: Link, code: string): void {
     this.links.delete(link.id)
+    this.history?.end(link.id, code)
     for (const id of [link.host, link.client]) {
       const p = this.peers.get(id)
       if (p && (p.role === 'client' || modernHost(p.version))) this.send(p, createControlFrame('error', { code, message: code, connectionId: link.id, retryable: true }))
@@ -272,21 +279,22 @@ export class Gateway {
     const p = frame.payload as Record<string, unknown>
     if (frame.type === 'ping') { this.send(peer, createControlFrame('pong', { nonce: p.nonce })); return }
     if (frame.type === 'pong') {
-      if (peer.nonce && p.nonce === peer.nonce) { peer.lastPong = Date.now(); peer.nonce = undefined }
+      if (peer.nonce && p.nonce === peer.nonce) { peer.lastPong = Date.now(); if (peer.pingAt !== undefined) { peer.rttMs = Math.max(0, peer.lastPong - peer.pingAt); peer.rttAt = peer.lastPong }; peer.nonce = undefined }
       return
     }
     if (frame.type === 'connect.request') {
       const request = frame.payload as ConnectRequestPayload
       if (peer.role !== 'client') throw new ApiError('MEMBERSHIP_REQUIRED')
       const host = this.peers.get(request.hostDeviceId)
-      if (!host || host.role !== 'host') { this.send(peer, createControlFrame('error', { code: 'HOST_OFFLINE', message: 'Host is offline.', retryable: true })); return }
+      if (!host || host.role !== 'host') { this.history?.failure(request.hostDeviceId, peer.id, 'HOST_OFFLINE'); this.send(peer, createControlFrame('error', { code: 'HOST_OFFLINE', message: 'Host is offline.', retryable: true })); return }
       this.store.get(host.id)
       const transports = this.usableTransports(request.preferredTransports, peer, host)
-      if (transports.length === 0) throw new ApiError('CAPABILITY_NOT_SUPPORTED')
+      if (transports.length === 0) { this.history?.failure(host.id, peer.id, 'CAPABILITY_NOT_SUPPORTED'); throw new ApiError('CAPABILITY_NOT_SUPPORTED') }
       for (const old of this.links.values()) if (old.client === peer.id || (old.host === host.id && !modernHost(host.version))) this.drop(old, 'CONNECTION_REPLACED')
-      if (this.links.size >= 256) throw new ApiError('RATE_LIMITED')
+      if (this.links.size >= 256) { this.history?.failure(host.id, peer.id, 'RATE_LIMITED'); throw new ApiError('RATE_LIMITED') }
       const link: Link = { id: randomUUID(), host: host.id, client: peer.id, stage: 'pending', connectedAt: Date.now(), counters: new Map(), transports }
       this.links.set(link.id, link)
+      this.history?.start(link.id, link.host, link.client, link.connectedAt)
       this.send(host, createControlFrame('connect.incoming', { connectionId: link.id, clientDeviceId: peer.id, clientIdentityKey: this.store.get(peer.id).descriptor.identityKey, authorization: 'account', preferredTransports: [...transports] }))
       return
     }
@@ -299,8 +307,8 @@ export class Gateway {
     if (!other) throw new ApiError('CONNECTION_FAILED')
     if (frame.type === 'connect.accepted' || frame.type === 'connect.rejected') {
       if (peer.id !== link.host || link.stage !== 'pending') throw new ApiError('INVALID_MESSAGE')
-      if (frame.type === 'connect.rejected') this.links.delete(link.id)
-      else link.stage = 'accepted'
+      if (frame.type === 'connect.rejected') { this.links.delete(link.id); this.history?.end(link.id, 'REJECTED', 'rejected') }
+      else { link.stage = 'accepted'; this.history?.updateStage(link.id, 'accepted') }
       this.send(other, frame)
       return
     }
@@ -317,6 +325,7 @@ export class Gateway {
       } else {
         link.hostTransport = selected
       }
+      this.history?.transport(link.id, selected, peer.id === link.host ? 'host' : 'client')
       if (modernHost(other.version) && link.transports.includes(selected)) this.send(other, frame)
       return
     }
@@ -333,13 +342,15 @@ export class Gateway {
       if (step === 1 && peer.id === link.client && link.stage === 'accepted') link.stage = 'handshake'
       else if (step === 2 && peer.id === link.host && link.stage === 'handshake') link.stage = 'ready'
       else throw new ApiError('INVALID_MESSAGE')
+      this.history?.updateStage(link.id, link.stage as 'handshake' | 'ready')
     } else if (frame.type === 'relay') {
       if (!link.transports.includes('relay')) throw new ApiError('CAPABILITY_NOT_SUPPORTED')
       const counter = (frame.payload as RelayPayload).counter
       if (link.stage !== 'ready' || counter <= (link.counters.get(peer.id) ?? -1)) throw new ApiError('INVALID_MESSAGE')
       link.counters.set(peer.id, counter)
     } else throw new ApiError('INVALID_MESSAGE')
-    this.send(other, frame)
+    const relayBytes = frame.type === 'relay' ? Buffer.from((frame.payload as RelayPayload).ciphertext, 'base64url').length : undefined
+    this.send(other, frame, relayBytes === undefined ? undefined : () => this.history?.relay(link.id, relayBytes))
   }
   /** True when `deviceId` is a party to a live link, used to scope TURN credentials. */
   ownsLink(connectionId: string, deviceId: string): boolean {
@@ -358,5 +369,6 @@ export class Gateway {
       ...(link.hostTransport === undefined ? {} : { hostTransport: link.hostTransport }),
     }))
   }
-  close(): void { clearInterval(this.heartbeat); for (const ws of this.wss.clients) ws.terminate(); this.wss.close() }
+  peerRtt() { return [...this.peers.values()].flatMap(p => p.rttMs === undefined ? [] : [{ deviceId: p.id, rttMs: p.rttMs, measuredAt: p.rttAt! }]) }
+  close(): void { for (const link of this.links.values()) this.history?.end(link.id, 'SERVER_SHUTDOWN'); this.links.clear(); clearInterval(this.heartbeat); for (const ws of this.wss.clients) ws.terminate(); this.wss.close() }
 }

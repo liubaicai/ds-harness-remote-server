@@ -502,6 +502,56 @@ describe('ice credential endpoint', () => {
     expect(turn.credential).toBe(createHmac('sha1', 'turn-shared-secret').update(turn.username).digest('base64'))
   })
 })
+describe('connection observability', () => {
+  it('requires account authentication including for downloads and validates pagination', async () => {
+    const d = await device()
+    for (const path of ['/account/connection-history', '/account/connection-stats', '/account/diagnostics', '/account/diagnostics/export']) {
+      expect((await request(path)).status).toBe(401)
+      expect((await request(path, 'GET', undefined, d.accessToken)).status).toBe(401)
+      expect((await request(path, 'GET', undefined, accountToken)).status).toBe(200)
+    }
+    for (const query of ['limit=0', 'limit=101', 'limit=-1', 'offset=-1', 'offset=1.5', 'limit=abc']) expect((await request(`/account/connection-history?${query}`, 'GET', undefined, accountToken)).status).toBe(400)
+    expect((await request('/account/diagnostics?connectionId=missing', 'GET', undefined, accountToken)).status).toBe(404)
+    const checks = (await request('/account/diagnostics', 'GET', undefined, accountToken)).data.checks
+    expect(checks.find((c: any) => c.id === 'turn-reachability').status).toBe('unknown')
+    expect(checks.find((c: any) => c.id === 'client-reachability').status).toBe('unknown')
+  })
+  it('records lifecycle and transport changes, counts only forwarded relay ciphertext, persists shutdown', async () => {
+    const ctx = await connection(); const { initiator } = await handshake(ctx)
+    ctx.client.send('transport.selected', { connectionId: ctx.connectionId, targetDeviceId: ctx.h.deviceId, transport: 'relay' })
+    await ctx.host.next('transport.selected')
+    const ciphertext = toBase64Url(initiator.encrypt(new TextEncoder().encode('SECRET-PAYLOAD')))
+    ctx.client.send('relay', { connectionId: ctx.connectionId, targetDeviceId: ctx.h.deviceId, counter: 0, ciphertext })
+    await ctx.host.next('relay')
+    const result = await request('/account/connection-history?limit=1&offset=0', 'GET', undefined, accountToken)
+    const r = result.data.items[0]
+    expect(r).toMatchObject({ connectionId: ctx.connectionId, stage: 'ready', selectedTransport: 'relay', relayFrames: 1, relayBytes: Buffer.from(ciphertext, 'base64url').length })
+    expect(r.events.filter((e: any) => e.type === 'stage').map((e: any) => e.stage)).toEqual(['pending', 'accepted', 'handshake', 'ready'])
+    expect(r.handshakeDurationMs).toBeGreaterThanOrEqual(0)
+    const exported = await request(`/account/diagnostics/export?connectionId=${ctx.connectionId}`, 'GET', undefined, accountToken)
+    expect(exported.headers.get('content-disposition')).toContain('attachment')
+    const text = JSON.stringify(exported.data)
+    for (const secret of [ctx.connectionId, ctx.h.deviceId, ctx.c.deviceId, ctx.h.identityKey, ctx.h.accessToken, ctx.h.name, account, ciphertext, 'SECRET-PAYLOAD']) expect(text).not.toContain(secret)
+    expect(exported.data.connections).toHaveLength(1)
+    expect((await request('/account/connection-stats', 'GET', undefined, accountToken)).data.totals).toMatchObject({ ready: 1, relayFrames: 1 })
+    await app.close(); await start(); accountToken = (await request('/auth/login', 'POST', { email: account, password })).data.token
+    expect((await request('/account/connection-history', 'GET', undefined, accountToken)).data.items[0]).toMatchObject({ stage: 'closed', endReason: 'SERVER_SHUTDOWN', relayFrames: 1 })
+  })
+  it('records offline, capability failures and Host rejection without peer reason text', async () => {
+    const h = await device('host'), c = await device(), client = await socket(c); await client.next('hello.ack')
+    client.send('connect.request', { hostDeviceId: h.deviceId, preferredTransports: ['relay'] }); await client.next('error')
+    const host = await socket(h); await host.next('hello.ack')
+    client.send('connect.request', { hostDeviceId: h.deviceId, preferredTransports: ['turn'] }); await client.next('error')
+    const c2 = await device(), client2 = await socket(c2); await client2.next('hello.ack')
+    client2.send('connect.request', { hostDeviceId: h.deviceId, preferredTransports: ['relay'] })
+    const incoming = await host.next('connect.incoming')
+    host.send('connect.rejected', { connectionId: incoming.connectionId, reason: 'SECRET-REASON' }); await client2.next('connect.rejected')
+    const records = (await request('/account/connection-history', 'GET', undefined, accountToken)).data.items
+    expect(records.map((r: any) => r.endReason)).toEqual(['REJECTED', 'CAPABILITY_NOT_SUPPORTED', 'HOST_OFFLINE'])
+    expect(JSON.stringify(records)).not.toContain('SECRET-REASON')
+  })
+})
+
 describe('web ui routing', () => {
   it('serves the shell for every client route and keeps file and API paths strict', async () => {
     const web = join(dir, 'public')

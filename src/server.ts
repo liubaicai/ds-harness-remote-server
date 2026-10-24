@@ -8,6 +8,8 @@ import { deviceRegistrationRequestSchema, deviceRefreshRequestSchema } from './p
 import { ACCOUNT_SESSION_TTL_SECONDS, ApiError, Store, equal, hash } from './store.js'
 import { createClientIpResolver } from './client-ip.js'
 import { Gateway } from './gateway.js'
+import { ConnectionHistory, connectionStats, retention } from './connection-history.js'
+import { diagnose, sanitizedDiagnosticExport, type ProbeObservation } from './diagnostics.js'
 import { credentialLabel, iceServersFor, normalizeIceConfig, type IceConfig } from './ice.js'
 import { describeStunProbe, orderStunUrls, probeStunServers } from './stun-probe.js'
 
@@ -74,12 +76,14 @@ export function createRemoteServer(config: Config) {
   const store = new Store(config.dataFile, config.account.trim(), config.password)
   const webrtc = config.webrtc !== false
   const ice = normalizeIceConfig(config.ice)
+  const probe: ProbeObservation = { state: ice.probeStun === true && ice.stunUrls.length > 0 ? 'pending' : 'disabled', results: [] }
   if (ice.probeStun === true && ice.stunUrls.length > 0) {
     // Best effort and detached: the Server starts serving immediately, and the
     // ordering improves once the measurements land. Browsers fan out to every
     // endpoint, but werift (the fallback Host RTC backend) only takes the
     // first, so this ordering is what decides whether that path can punch.
     void probeStunServers(ice.stunUrls).then(results => {
+      probe.state = 'complete'; probe.observedAt = Date.now(); probe.results = results.map(r => ({ reachable: r.reachable, ...(r.rttMs === undefined ? {} : { rttMs: r.rttMs }) }))
       const ordered = orderStunUrls(ice.stunUrls, results)
       ice.stunUrls = ordered
       const summary = ordered.map(url => results.find(result => result.url === url)).filter(result => result !== undefined)
@@ -88,7 +92,7 @@ export function createRemoteServer(config: Config) {
       } else {
         console.info(`[ice] STUN probe, preferred first: ${describeStunProbe(summary)}`)
       }
-    }, () => undefined)
+    }, () => { probe.state = 'failed'; probe.observedAt = Date.now() })
   }
   const assets = readAssets(config.publicDir ?? defaultPublicDir)
   const clientIp = createClientIpResolver(config.trustedProxies)
@@ -125,7 +129,8 @@ export function createRemoteServer(config: Config) {
       json(res, e.status, { error: { code: e.code, message: e.code, requestId: randomUUID(), retryable: e.status === 429 || e.status >= 500 } })
     })
   })
-  const gateway = new Gateway(server, store, url.origin, { webrtc })
+  const history = new ConnectionHistory(`${config.dataFile}.connections.json`)
+  const gateway = new Gateway(server, store, url.origin, { webrtc, history })
   function descriptor(d: ReturnType<Store['get']>) {
     return { ...d.descriptor, membershipId: `account:${hash(store.account).slice(0, 16)}`, online: gateway.peers.has(d.descriptor.deviceId), lastSeenAt: d.lastSeenAt }
   }
@@ -177,6 +182,31 @@ export function createRemoteServer(config: Config) {
       const names = new Map(store.list().map(d => [d.descriptor.deviceId, d.descriptor.name]))
       const party = (id: string) => ({ deviceId: id, name: names.get(id) ?? id })
       json(res, 200, { items: gateway.connections().map(link => ({ ...link, host: party(link.host), client: party(link.client) })) }); return
+    }
+    if (method === 'GET' && ['/api/v1/account/connection-history', '/api/v1/account/connection-stats', '/api/v1/account/diagnostics', '/api/v1/account/diagnostics/export'].includes(path)) {
+      accountAuth(req)
+      const records = history.all()
+      if (path.endsWith('/connection-history')) {
+        const integer = (key: string, fallback: number, max: number) => {
+          const raw = requestUrl.searchParams.get(key)
+          if (raw === null) return fallback
+          if (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) > max) throw new ApiError('INVALID_MESSAGE')
+          return Number(raw)
+        }
+        const limit = integer('limit', 50, 100), offset = integer('offset', 0, Number.MAX_SAFE_INTEGER)
+        if (limit < 1) throw new ApiError('INVALID_MESSAGE')
+        json(res, 200, { items: records.slice(offset, offset + limit), total: records.length, limit, offset, retention }); return
+      }
+      if (path.endsWith('/connection-stats')) { json(res, 200, { ...connectionStats(records), serverPeerRtt: gateway.peerRtt() }); return }
+      const connectionId = requestUrl.searchParams.get('connectionId')
+      const connection = connectionId === null ? null : records.find(r => r.connectionId === connectionId)
+      if (connection === undefined) throw new ApiError('CONNECTION_NOT_FOUND', 404)
+      const diagnostics = diagnose({ webrtc, ice, probe, persistenceHealthy: history.persistenceHealthy, connection, devices: store.list().map(d => ({ deviceId: d.descriptor.deviceId, role: d.descriptor.role, online: gateway.peers.has(d.descriptor.deviceId), clientVersion: d.descriptor.clientVersion, ...('harnessVersion' in d.descriptor && d.descriptor.harnessVersion ? { harnessVersion: d.descriptor.harnessVersion } : {}) })) })
+      if (path.endsWith('/export')) {
+        res.setHeader('Content-Disposition', 'attachment; filename="connection-diagnostics.json"')
+        json(res, 200, sanitizedDiagnosticExport(diagnostics, connection ? [connection] : records)); return
+      }
+      json(res, 200, diagnostics); return
     }
     // Remove a device from the account: its tokens die, its socket drops, and
     // the registration slot is freed. The identity stays tombstoned so a stale
@@ -233,7 +263,11 @@ export function createRemoteServer(config: Config) {
     }
     throw new ApiError('METHOD_NOT_FOUND', 404)
   }
-  return { server, store, gateway, close: async () => { gateway.close(); server.closeAllConnections(); await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) } }
+  return { server, store, gateway, history, close: async () => {
+    gateway.close(); history.close(); server.closeAllConnections()
+    try { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())) }
+    finally { history.flush() } // Include any completed send callbacks drained during socket shutdown.
+  } }
 }
 function json(res: ServerResponse, status: number, value: unknown): void {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8' }); res.end(JSON.stringify(value))

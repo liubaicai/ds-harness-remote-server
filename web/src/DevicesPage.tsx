@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, RequestError, type Connection, type ConnectionList, type Device, type DeviceList, type TransportName } from './api'
 import { ThemeToggle } from './ThemeToggle'
 import { SiteFooter } from './SiteFooter'
+import { ConnectionInsights } from './ConnectionInsights'
 const { Paragraph, Text, Title } = Typography
 const transportText: Record<TransportName, string> = { lan: 'LAN 直连', p2p: 'P2P', turn: 'TURN 中继', relay: '服务器中继' }
 const transportColor: Record<TransportName, string> = { lan: 'green', p2p: 'blue', turn: 'orange', relay: 'default' }
@@ -97,7 +98,8 @@ export function DevicesPage({ account, onSignedOut }: { account: string; onSigne
         <Card className="page-card hosts-list-card" title="活动连接" extra={connections ? <Text type="secondary">{links.length} 个连接</Text> : undefined}>
           {!error && !loading && !links.length ? <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无活动连接" /> : <Table<Connection> rowKey="connectionId" columns={connectionColumns} dataSource={links} loading={loading} pagination={false} scroll={{ x: 'max-content' }} size="small" />}
         </Card>
-        {updated && <Paragraph className="selfhost-caption" type="secondary">更新于 {updated}</Paragraph>}
+        {updated && <Paragraph className="selfhost-caption" type="secondary">设备更新于 {updated}</Paragraph>}
+        <ConnectionInsights devices={devices} onSignedOut={onSignedOut} />
       </div></div></div>
     </Layout.Content><SiteFooter />
   </>
