@@ -1,6 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
@@ -19,19 +19,39 @@ export interface Config {
   webrtc?: boolean
   /** STUN/TURN endpoints handed to peers through `/api/v1/turn/credentials`. */
   ice?: Partial<IceConfig>
+  /** Directory holding the built Web UI. Defaults to `../dist/public`. */
+  publicDir?: string
 }
 const loginSchema = z.object({ email: z.string().min(1).max(254), password: z.string().min(1).max(1024) }).strict()
-const publicDir = fileURLToPath(new URL('../dist/public/', import.meta.url))
-function readAssets(): Map<string, Buffer> {
-  if (!existsSync(publicDir)) return new Map()
+const defaultPublicDir = fileURLToPath(new URL('../dist/public/', import.meta.url))
+function readAssets(dir: string): Map<string, Buffer> {
+  if (!existsSync(dir)) return new Map()
+  // Normalise the separator so asset keys never start with a slash, whether or
+  // not the configured directory was written with a trailing one.
+  const root = dir.endsWith(sep) ? dir : dir + sep
   const assets = new Map<string, Buffer>()
-  for (const entry of readdirSync(publicDir, { recursive: true, withFileTypes: true })) {
+  for (const entry of readdirSync(root, { recursive: true, withFileTypes: true })) {
     if (!entry.isFile()) continue
     const file = join(entry.parentPath, entry.name)
-    const path = file.slice(publicDir.length).replaceAll('\\', '/')
+    const path = file.slice(root.length).replaceAll('\\', '/')
     assets.set(path, readFileSync(file))
   }
   return assets
+}
+// A path is a file request when its last segment has an extension, or when it
+// lives under the hashed /assets/ output. Everything else is a Client route.
+function isFileRequest(path: string): boolean {
+  if (path.startsWith('/api/') || path.startsWith('/ws/')) return false
+  return path.startsWith('/assets/') || /\.[^/]+$/.test(path)
+}
+function contentType(name: string): string {
+  if (name.endsWith('.js')) return 'text/javascript; charset=utf-8'
+  if (name.endsWith('.css')) return 'text/css; charset=utf-8'
+  if (name.endsWith('.png')) return 'image/png'
+  if (name.endsWith('.webp')) return 'image/webp'
+  if (name.endsWith('.svg')) return 'image/svg+xml'
+  if (name.endsWith('.ico')) return 'image/x-icon'
+  return 'text/html; charset=utf-8'
 }
 async function body(req: IncomingMessage): Promise<unknown> {
   if (!req.headers['content-type']?.toLowerCase().startsWith('application/json')) throw new ApiError('INVALID_MESSAGE', 415)
@@ -67,7 +87,7 @@ export function createRemoteServer(config: Config) {
       }
     }, () => undefined)
   }
-  const assets = readAssets()
+  const assets = readAssets(config.publicDir ?? defaultPublicDir)
   const sessions = new Map<string, number>()
   const limits = new Map<string, { count: number; until: number }>()
   function rate(key: string, max: number) {
@@ -113,16 +133,24 @@ export function createRemoteServer(config: Config) {
     const method = req.method
     if (req.headers.origin && req.headers.origin !== url.origin) throw new ApiError('AUTH_INVALID', 403)
     if (req.headers['sec-fetch-site'] === 'cross-site') throw new ApiError('AUTH_INVALID', 403)
-    const staticAsset = path.startsWith('/assets/') || ['/icon.png', '/brand-whale.webp', '/landing-atmosphere.webp'].includes(path)
-    if (method === 'GET' && (['/', '/app', '/app/login'].includes(path) || staticAsset)) {
-      const name = staticAsset ? path.slice(1) : 'index.html'
-      const asset = assets.get(name)
+    // A file request resolves to that file or to a 404 — never to the shell, or
+    // a missing bundle would silently arrive as HTML.
+    if (method === 'GET' && isFileRequest(path)) {
+      const asset = assets.get(path.slice(1))
       if (!asset) throw new ApiError('METHOD_NOT_FOUND', 404)
-      const contentType = name.endsWith('.js') ? 'text/javascript; charset=utf-8' : name.endsWith('.css') ? 'text/css; charset=utf-8' : name.endsWith('.png') ? 'image/png' : name.endsWith('.webp') ? 'image/webp' : 'text/html; charset=utf-8'
-      res.setHeader('Content-Type', contentType)
+      res.setHeader('Content-Type', contentType(path))
       res.end(asset); return
     }
     if (method === 'GET' && (path === '/health' || path === '/healthz' || path === '/ready')) { json(res, 200, { status: 'ok' }); return }
+    // History-mode SPA. The Client routes on window.location.pathname, so every
+    // remaining GET renders index.html; without this a reload on /app/remote
+    // would 404 because only the exact paths the Server knew about were served.
+    if (method === 'GET' && !path.startsWith('/api/') && !path.startsWith('/ws/')) {
+      const shell = assets.get('index.html')
+      if (!shell) throw new ApiError('METHOD_NOT_FOUND', 404)
+      res.setHeader('Content-Type', 'text/html; charset=utf-8')
+      res.end(shell); return
+    }
     rate(`api:${req.socket.remoteAddress ?? ''}`, 240)
     if (method === 'POST' && path === '/api/v1/auth/login') {
       rate(`login:${req.socket.remoteAddress ?? ''}`, 20)

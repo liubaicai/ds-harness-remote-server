@@ -1,6 +1,6 @@
 import { runScenarios, scenarioName } from './support/test-scenarios.mjs'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { randomUUID, createHmac } from 'node:crypto'
@@ -20,10 +20,24 @@ async function request(path: string, method = 'GET', body?: unknown, token?: str
   const response = await fetch(`${base}/api/v1${path}`, { method, headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...headers }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
   return { status: response.status, data: await response.json(), headers: response.headers }
 }
+async function page(path: string) {
+  const response = await fetch(`${base}${path}`)
+  const type = response.headers.get('content-type') ?? ''
+  return { status: response.status, type, text: type.includes('application/json') ? JSON.stringify(await response.json()) : await response.text() }
+}
+// fetch refuses a fixed list of "bad ports". This host hands out ephemeral
+// ports from 1024 upwards, so a loopback listener can legitimately land on one
+// and make every request in the case fail with a bare "bad port".
+const BAD_PORTS = new Set([2049, 3659, 4045, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668, 6669, 6697, 10080])
 async function start(pass = password, extra: Partial<Parameters<typeof createRemoteServer>[0]> = {}) {
   app = createRemoteServer({ account, password: pass, dataFile: join(dir, 'state.json'), publicUrl: 'http://localhost:8080', ...extra })
-  app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening')
-  base = `http://127.0.0.1:${(app.server.address() as { port: number }).port}`
+  for (let attempt = 0; ; attempt++) {
+    app.server.listen(0, '127.0.0.1'); await once(app.server, 'listening')
+    const { port } = app.server.address() as { port: number }
+    if (!BAD_PORTS.has(port)) { base = `http://127.0.0.1:${port}`; return }
+    if (attempt === 20) throw new Error('could not bind a port fetch will talk to')
+    await new Promise<void>((resolve, reject) => app.server.close(error => error ? reject(error) : resolve()))
+  }
 }
 async function device(role: 'host' | 'client' = 'client') {
   const keys = generateKeyPair()
@@ -426,5 +440,43 @@ describe('ice credential endpoint', () => {
     expect(Number(expiry)).toBeLessThanOrEqual(Math.floor(Date.now() / 1000) + 600)
     expect(label).toBe(`${ctx.connectionId.slice(0, 8)}-${ctx.c.deviceId.slice(0, 8)}`)
     expect(turn.credential).toBe(createHmac('sha1', 'turn-shared-secret').update(turn.username).digest('base64'))
+  })
+})
+describe('web ui routing', () => {
+  it('serves the shell for every client route and keeps file and API paths strict', async () => {
+    const web = join(dir, 'public')
+    mkdirSync(join(web, 'assets'), { recursive: true })
+    writeFileSync(join(web, 'index.html'), '<!doctype html><div id="root"></div>')
+    writeFileSync(join(web, 'assets', 'app-abc123.js'), 'console.log(1)')
+    writeFileSync(join(web, 'icon.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]))
+    await app.close()
+    await start(password, { publicDir: web })
+
+    // A reload on a Client route must return the shell. /app/remote is the one
+    // that used to 404 because the Server kept a hard-coded page list.
+    for (const path of ['/', '/app', '/app/login', '/app/remote', '/app/remote?device=abc', '/some/nested/route']) {
+      const response = await page(path)
+      expect(response.status, path).toBe(200)
+      expect(response.type, path).toContain('text/html')
+      expect(response.text, path).toContain('<div id="root">')
+    }
+
+    const script = await page('/assets/app-abc123.js')
+    expect(script.status).toBe(200)
+    expect(script.type).toContain('text/javascript')
+    expect(script.text).toContain('console.log(1)')
+    expect((await page('/icon.png')).type).toBe('image/png')
+
+    // A missing bundle must 404 as JSON rather than returning the shell, or a
+    // broken build would load HTML as a script and fail silently.
+    const missing = await page('/assets/app-missing.js')
+    expect(missing.status).toBe(404)
+    expect(missing.type).toContain('application/json')
+
+    // API paths are never shadowed by the shell, and health stays JSON.
+    const unknown = await page('/api/v1/nope')
+    expect(unknown.status).toBe(404)
+    expect(unknown.type).toContain('application/json')
+    expect((await page('/healthz')).text).toBe('{"status":"ok"}')
   })
 })
