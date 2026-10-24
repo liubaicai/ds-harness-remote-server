@@ -5,6 +5,7 @@ import { useState } from 'react'
 import { api, type Account } from './api'
 import { ThemeToggle } from './ThemeToggle'
 import { SiteFooter } from './SiteFooter'
+import { REPOSITORY_URL } from './links'
 export function LoginPanel({ onAuthSuccess, initialError }: { onAuthSuccess: (account: Account) => void; initialError?: string }) {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState(initialError ?? '')
@@ -18,7 +19,7 @@ export function LoginPanel({ onAuthSuccess, initialError }: { onAuthSuccess: (ac
     finally { setLoading(false) }
   }
   return <><main className="auth-page">
-    <div className="auth-language-menu"><a className="auth-github-link" href="https://github.com/liguobao/dsh-harness-remote" target="_blank" rel="noreferrer"><GithubOutlined /> GitHub</a><ThemeToggle className="auth-theme-toggle" /></div>
+    <div className="auth-language-menu"><a className="auth-github-link" href={REPOSITORY_URL} target="_blank" rel="noreferrer"><GithubOutlined /> GitHub</a><ThemeToggle className="auth-theme-toggle" /></div>
     <section className="auth-content">
       <div className="auth-logo-stack"><a className="auth-home-link" href="/" aria-label="返回首页"><img className="auth-brand-icon" src="/brand-whale.webp" alt="" width="48" height="48" /><Typography.Title>DeepSeek Harness Remote</Typography.Title></a></div>
       <Card className="auth-panel">

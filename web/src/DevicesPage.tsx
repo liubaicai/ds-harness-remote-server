@@ -6,6 +6,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, RequestError, type Connection, type ConnectionList, type Device, type DeviceList, type TransportName } from './api'
 import { ThemeToggle } from './ThemeToggle'
 import { SiteFooter } from './SiteFooter'
+import { REPOSITORY_URL } from './links'
 import { ConnectionInsights } from './ConnectionInsights'
 const { Paragraph, Text, Title } = Typography
 const transportText: Record<TransportName, string> = { lan: 'LAN 直连', p2p: 'P2P', turn: 'TURN 中继', relay: '服务器中继' }
@@ -86,7 +87,7 @@ export function DevicesPage({ account, onSignedOut }: { account: string; onSigne
     ><Button type="text" danger size="small" loading={deleting.has(device.deviceId)} disabled={loading} aria-label={`删除设备 ${device.name}`}>删除</Button></Popconfirm> },
   ]
   return <>
-    <Layout.Header className="topbar product-topbar"><div className="topbar-inner"><div className="topbar-brand-group is-product"><a className="topbar-brand" href="/" aria-label="返回首页"><img className="topbar-brand-mark" src="/brand-whale.webp" alt="" width="40" height="40" /><span className="topbar-brand-copy"><Title level={3}>DeepSeek Harness Remote</Title><small>安全远程访问</small></span></a></div><div className="topbar-actions"><a className="topbar-github-link product-github-link" href="https://github.com/liguobao/dsh-harness-remote" target="_blank" rel="noreferrer" aria-label="GitHub"><GithubOutlined /> GitHub</a><ThemeToggle /><Button type="text" loading={loggingOut} onClick={() => void logout()}>退出登录</Button></div></div></Layout.Header>
+    <Layout.Header className="topbar product-topbar"><div className="topbar-inner"><div className="topbar-brand-group is-product"><a className="topbar-brand" href="/" aria-label="返回首页"><img className="topbar-brand-mark" src="/brand-whale.webp" alt="" width="40" height="40" /><span className="topbar-brand-copy"><Title level={3}>DeepSeek Harness Remote</Title><small>安全远程访问</small></span></a></div><div className="topbar-actions"><a className="topbar-github-link product-github-link" href={REPOSITORY_URL} target="_blank" rel="noreferrer" aria-label="GitHub"><GithubOutlined /> GitHub</a><ThemeToggle /><Button type="text" loading={loggingOut} onClick={() => void logout()}>退出登录</Button></div></div></Layout.Header>
     <Layout.Content className="product-content selfhost-content" id="main-content">
       <div className="app-area"><div className="workspace-view"><div className="hosts-page">
         <header className="workspace-page-header"><div><Title level={2}>我的设备</Title><Paragraph className="selfhost-account">{account}</Paragraph></div><Space className="workspace-page-actions" wrap><Button onClick={() => void load()} loading={loading} disabled={deleting.size > 0}>刷新</Button></Space></header>

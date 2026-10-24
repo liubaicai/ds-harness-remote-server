@@ -1,0 +1,161 @@
+/* Radix UI Colors, Slate + Indigo (sRGB).
+ * Source: https://github.com/radix-ui/colors/tree/main/src
+ * Steps 1–2: surfaces; 3–5: interactive surfaces; 6–8: borders/focus;
+ * 9–10: solid controls; 11–12: secondary and high-contrast text.
+ * Scoped to the homepage so the account and login themes are unchanged.
+ */
+.landing-shell {
+  --slate-1: #fcfcfd;
+  --slate-2: #f9f9fb;
+  --slate-3: #f0f0f3;
+  --slate-4: #e8e8ec;
+  --slate-6: #d9d9e0;
+  --slate-7: #cdced6;
+  --slate-11: #60646c;
+  --slate-12: #1c2024;
+  --indigo-3: #edf2fe;
+  --indigo-8: #8da4ef;
+  --indigo-9: #3e63dd;
+  --indigo-10: #3358d4;
+  --indigo-11: #3a5bc7;
+  --indigo-12: #1f2d5c;
+  --red-11: #ce2c31;
+  --solid-text: #ffffff;
+  --home-width: 1184px;
+  --home-gutter: 40px;
+  --home-type-body: 14px;
+  --home-type-heading: 18px;
+  --home-type-display: 44px;
+  /* Shared selection styles also use the local Radix palette. */
+  --color-text: var(--slate-12);
+  --color-primary-soft: var(--indigo-3);
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  color: var(--slate-12);
+  background: var(--slate-2);
+  font-size: var(--home-type-body);
+  line-height: 1.6;
+  scrollbar-color: var(--slate-7) var(--slate-2);
+}
+
+:root[data-theme="dark"] .landing-shell {
+  --slate-1: #111113;
+  --slate-2: #18191b;
+  --slate-3: #212225;
+  --slate-4: #272a2d;
+  --slate-6: #363a3f;
+  --slate-7: #43484e;
+  --slate-11: #b0b4ba;
+  --slate-12: #edeef0;
+  --indigo-3: #182449;
+  --indigo-8: #435db1;
+  --indigo-9: #3e63dd;
+  --indigo-10: #3358d4; /* Radix light Indigo 10 retains AA contrast with white. */
+  --indigo-11: #9eb1ff;
+  --indigo-12: #d6e1ff;
+  --red-11: #ff9592;
+}
+
+.landing-shell *,
+.landing-shell *::before,
+.landing-shell *::after {
+  animation: none !important;
+  transition: none !important;
+  box-shadow: none !important;
+}
+
+.landing-shell :is(a, button) {
+  -webkit-tap-highlight-color: transparent;
+}
+
+.landing-shell a { color: inherit; text-decoration: none; }
+.landing-shell :is(a, button):focus-visible {
+  outline: 2px solid var(--indigo-8);
+  outline-offset: 4px;
+}
+.landing-shell #landing-main:focus { outline: none; }
+.landing-container { width: min(var(--home-width), calc(100% - var(--home-gutter) * 2)); margin-inline: auto; }
+
+.landing-skip { position: fixed; z-index: 30; top: 12px; left: 12px; padding: 10px 16px; color: var(--solid-text) !important; background: var(--indigo-9); transform: translateY(-160%); border-radius: 6px; }
+.landing-skip:focus { transform: none; }
+.landing-header { border-bottom: 0.5px solid var(--slate-6); background: var(--slate-1); }
+.landing-header-inner { min-height: 80px; display: flex; justify-content: space-between; align-items: center; gap: 24px; }
+.landing-brand { min-width: 0; display: inline-flex; align-items: center; gap: 12px; font-size: var(--home-type-heading); font-weight: 600; line-height: 1.3; }
+.landing-brand-mark { flex: 0 0 36px; width: 36px; height: 36px; background: var(--indigo-11); mask: url('/brand-whale.webp') center / contain no-repeat; }
+.landing-nav { flex-shrink: 0; display: flex; align-items: center; gap: 12px; }
+.landing-nav :is(.landing-nav-github, .landing-nav-start) { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 40px; padding-inline: 12px; font-weight: 500; border-radius: 6px; white-space: nowrap; }
+.landing-nav-github { color: var(--slate-11) !important; }
+.landing-nav .landing-nav-github:hover { color: var(--slate-12) !important; background: var(--slate-3); }
+.landing-nav .landing-nav-start { color: var(--indigo-11); background: var(--indigo-3); }
+.landing-nav .landing-nav-start:hover { color: var(--indigo-12); background: var(--slate-4); }
+.landing-nav .theme-toggle.ant-btn { flex-shrink: 0; width: 40px; min-width: 40px; height: 40px; min-height: 40px; padding: 0; border: 0; border-radius: 6px; color: var(--slate-11); background: transparent; font-size: var(--home-type-heading); }
+.landing-nav .theme-toggle.ant-btn:hover { color: var(--slate-12); background: var(--slate-3); }
+.landing-nav .theme-toggle.ant-btn:focus-visible { outline: 2px solid var(--indigo-8); outline-offset: 4px; }
+
+.landing-intro { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 80px; align-items: center; padding-block: 88px 80px; }
+.landing-copy { min-width: 0; }
+.landing-eyebrow { display: flex; align-items: center; gap: 8px; margin: 0 0 20px; color: var(--indigo-11); font-weight: 500; }
+.landing-copy h1 { margin: 0; color: var(--slate-12); font-size: var(--home-type-display); font-weight: 650; line-height: 1.3; letter-spacing: -0.025em; }
+.landing-description { max-width: 27em; margin: 24px 0 0; color: var(--slate-11); font-size: var(--home-type-heading); line-height: 1.8; text-wrap: pretty; }
+.landing-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 32px; }
+.landing-shell .landing-button { min-height: 48px; display: inline-flex; align-items: center; justify-content: center; gap: 12px; padding: 10px 20px; border: 0.5px solid transparent; border-radius: 6px; font-size: var(--home-type-body); font-weight: 600; }
+.landing-shell .landing-button-primary { color: var(--solid-text); background: var(--indigo-9); }
+.landing-shell .landing-button-primary:hover { background: var(--indigo-10); }
+.landing-shell .landing-button-secondary { color: var(--slate-12); background: var(--slate-1); border-color: var(--slate-7); }
+.landing-shell .landing-button-secondary:hover { background: var(--slate-3); }
+.landing-workspaces { margin: 20px 0 0; color: var(--slate-11); }
+
+.landing-setup { min-width: 0; padding: 32px; background: var(--slate-1); border: 0.5px solid var(--slate-6); border-radius: 8px; }
+.landing-setup h2 { margin: 0 0 28px; font-size: var(--home-type-heading); font-weight: 600; line-height: 1.4; }
+.landing-setup-steps { margin: 0; padding: 0; list-style: none; counter-reset: setup-step; }
+.landing-setup-steps > li { position: relative; padding-left: 32px; counter-increment: setup-step; }
+.landing-setup-steps > li::before { content: counter(setup-step, decimal-leading-zero); position: absolute; left: 0; top: 0; color: var(--slate-11); font-weight: 500; font-variant-numeric: tabular-nums; }
+.landing-setup-steps > li + li { margin-top: 28px; padding-top: 24px; border-top: 0.5px solid var(--slate-6); }
+.landing-setup-steps > li + li::before { top: 24px; }
+.landing-setup h3 { margin: 0; font-size: var(--home-type-body); font-weight: 600; line-height: 1.6; }
+.landing-setup p { margin: 12px 0 0; color: var(--slate-11); }
+.landing-command { display: grid; grid-template-columns: minmax(0, 1fr) 40px; align-items: center; gap: 8px; margin-top: 14px; padding: 6px; color: var(--slate-12); background: var(--slate-3); border: 0.5px solid var(--slate-6); border-radius: 6px; }
+.landing-command code { min-width: 0; padding: 6px; font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; font-size: var(--home-type-body); line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.landing-command button { display: grid; place-items: center; width: 40px; height: 40px; padding: 0; color: var(--slate-11); background: transparent; border: 0; border-radius: 0; cursor: pointer; font-size: var(--home-type-body); }
+.landing-command button:hover { color: var(--slate-12); background: var(--slate-4); }
+.landing-command button:focus-visible { outline-offset: -2px; }
+.landing-setup .landing-copy-error { color: var(--red-11); }
+
+.landing-features { padding-block: 40px 56px; border-top: 0.5px solid var(--slate-6); }
+.landing-features dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 40px; margin: 0; }
+.landing-features dt { margin: 0; font-size: var(--home-type-heading); font-weight: 600; }
+.landing-features dd { margin: 10px 0 0; color: var(--slate-11); }
+.landing-footer { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-top: auto; padding-block: 24px; color: var(--slate-11); border-top: 0.5px solid var(--slate-6); }
+.landing-footer a:hover { color: var(--indigo-11); text-decoration: underline; text-underline-offset: 4px; }
+
+@media (max-width: 1000px) {
+  .landing-intro { gap: 40px; padding-block: 64px; }
+  .landing-setup { padding: 24px; }
+}
+
+@media (max-width: 760px) {
+  .landing-shell { --home-gutter: 24px; --home-type-display: 36px; }
+  .landing-header-inner { min-height: 104px; flex-wrap: wrap; padding-block: 16px; gap: 12px; }
+  .landing-brand { gap: 10px; }
+  .landing-brand-mark { flex-basis: 28px; width: 28px; height: 28px; }
+  .landing-nav { width: 100%; gap: 8px; }
+  .landing-nav .theme-toggle { margin-left: auto; }
+  .landing-nav .landing-nav-github { padding-left: 0; }
+  .landing-nav .landing-nav-start { margin-left: auto; }
+  .landing-nav .theme-toggle.ant-btn { margin-left: 0; }
+  .landing-intro { grid-template-columns: minmax(0, 1fr); padding-block: 40px; gap: 36px; }
+  .landing-eyebrow { margin-bottom: 16px; }
+  .landing-description { margin-top: 20px; }
+  .landing-actions { margin-top: 24px; }
+  .landing-setup { padding: 24px; }
+  .landing-features { padding-block: 28px 36px; }
+  .landing-features dl { grid-template-columns: minmax(0, 1fr); gap: 24px; }
+  .landing-features dd { margin-top: 6px; }
+  .landing-footer { flex-wrap: wrap; padding-block: 20px; gap: 8px 20px; }
+}
+
+@media (max-width: 380px) {
+  .landing-shell { --home-gutter: 16px; }
+  .landing-setup { padding: 20px; }
+}

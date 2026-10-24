@@ -28,6 +28,13 @@
 .observability-transports strong { color: var(--obs-text); margin-left: 4px; }
 .observability-note { font-size: 12px; line-height: 1.6; }
 .observability-device-pair { display: flex; flex-direction: column; min-width: 130px; max-width: 220px; overflow-wrap: anywhere; }
+.observability-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 20px; padding-top: 16px; }
+.observability-pagination > .ant-typography { font-size: 12px; font-variant-numeric: tabular-nums; }
+.observability-pagination .ant-pagination { display: flex; flex-wrap: wrap; align-items: center; margin: 0; }
+.observability-pagination .ant-pagination :is(.ant-pagination-prev, .ant-pagination-next),
+.observability-pagination .ant-pagination.ant-pagination-mini :is(.ant-pagination-prev, .ant-pagination-next) { width: auto; min-width: 64px; }
+.observability-pagination .ant-pagination .ant-pagination-item-link { padding-inline: 8px; font-size: 14px; }
+.observability-pagination :is(.ant-pagination-item, .ant-pagination-item-link) { border-width: 0.5px; }
 .observability-rtt { padding: 16px 0; border-bottom: 0.5px solid var(--obs-border); }
 .observability-rtt summary { cursor: pointer; font-weight: 500; }
 .observability-rtt summary:focus-visible { outline: 2px solid var(--obs-muted); outline-offset: 4px; }
@@ -48,4 +55,6 @@
 @media (max-width: 760px) {
   .observability-header { align-items: flex-start; flex-direction: column; }
   .observability-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+  .observability-pagination { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .observability-pagination .ant-pagination { align-self: flex-end; }
 }

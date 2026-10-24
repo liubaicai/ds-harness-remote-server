@@ -1,4 +1,4 @@
-import { Alert, Button, Descriptions, Empty, Modal, Space, Table, Tag, Timeline, Typography } from 'antd'
+import { Alert, Button, Descriptions, Empty, Modal, Pagination, Space, Table, Tag, Timeline, Typography } from 'antd'
 import type { TableColumnsType } from 'antd'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, RequestError, type Device } from './api'
@@ -86,6 +86,10 @@ export function ConnectionInsights({ devices, onSignedOut }: { devices: Device[]
     { title: '操作', key: 'action', render: (_, record) => <Button type="link" onClick={() => void diagnose(record.connectionId)}>诊断</Button> },
   ]
   const record = diagnostics?.connection
+  // Keep pagination aligned with the rows actually shown, including stale data after a failed request.
+  const displayedPage = history ? Math.floor(history.offset / PAGE_SIZE) + 1 : 1
+  const firstRow = history?.items.length ? history.offset + 1 : 0
+  const lastRow = history?.items.length ? history.offset + history.items.length : 0
   return <section className="connection-insights" aria-labelledby="connection-insights-title">
     <header className="observability-header">
       <div><h3 id="connection-insights-title">连接历史与质量</h3><Text type="secondary">保留最近 7 天，最多 1,000 条。每 30 秒更新。</Text></div>
@@ -103,7 +107,15 @@ export function ConnectionInsights({ devices, onSignedOut }: { devices: Device[]
     <Paragraph type="secondary" className="observability-note">统计仅覆盖保留记录。通道以设备上报为准，握手完成不代表业务请求成功。中继流量不含直连及 TURN 流量，端到端延迟和丢包率尚不可测。</Paragraph>
     <Table<ConnectionRecord> rowKey="connectionId" columns={columns} dataSource={history?.items ?? []} loading={loading} size="small" scroll={{ x: 960 }}
       locale={{ emptyText: <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无连接记录，新连接建立后会在这里显示" /> }}
-      pagination={{ current: page, pageSize: PAGE_SIZE, total: history?.total ?? 0, showSizeChanger: false, hideOnSinglePage: true, onChange: setPage, showTotal: total => `共 ${total} 条` }} />
+      pagination={false} />
+    <nav className="observability-pagination" aria-label="连接历史分页">
+      <Text type="secondary" role="status">{history?.items.length ? `${firstRow}–${lastRow} / 共 ${history.total} 条` : `共 ${history?.total ?? 0} 条`}</Text>
+      <Pagination current={displayedPage} pageSize={PAGE_SIZE} total={history?.total ?? 0} showSizeChanger={false} hideOnSinglePage={false} showLessItems responsive disabled={loading || !history}
+        onChange={nextPage => { if (nextPage === page) void load(); else setPage(nextPage) }}
+        itemRender={(_, type, original) => type === 'prev' || type === 'next'
+          ? <button type="button" className="ant-pagination-item-link" aria-label={type === 'prev' ? '上一页' : '下一页'}>{type === 'prev' ? '上一页' : '下一页'}</button>
+          : original} />
+    </nav>
     {stats && <details className="observability-rtt"><summary>服务器与设备的心跳往返时间</summary>
       <Paragraph type="secondary">不是客户端与 Host 之间的端到端延迟。无样本时不显示估算值。</Paragraph>
       {stats.serverPeerRtt.length ? <ul>{stats.serverPeerRtt.map(sample => <li key={sample.deviceId}><span>{deviceName(sample.deviceId)}</span><strong>{formatDuration(sample.rttMs)}</strong><Text type="secondary">采样于 {time(sample.measuredAt)}</Text></li>)}</ul> : <Text type="secondary">暂无有效心跳样本</Text>}

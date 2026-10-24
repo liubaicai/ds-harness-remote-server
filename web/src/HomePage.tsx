@@ -1,26 +1,107 @@
-import { ApiOutlined, CheckCircleOutlined, CopyOutlined, GithubOutlined, LinkOutlined, RightOutlined } from '@ant-design/icons'
-import { Layout } from 'antd'
-import { useState } from 'react'
+import { ArrowRightOutlined, CheckOutlined, CopyOutlined, GithubOutlined, LockOutlined } from '@ant-design/icons'
+import { useEffect, useRef, useState } from 'react'
 import { navigate } from './main'
-import { SiteFooter } from './SiteFooter'
+import { REPOSITORY_URL } from './links'
 import { ThemeToggle } from './ThemeToggle'
+import './home.css'
 
-const REPOSITORY = 'https://github.com/liguobao/ds-harness-remote'
+const REMOTE_PATH = '/app/remote'
 const DSH_COMMAND = 'dsh plugin --profile web add ds-harness-remote@0.5.2'
 
-function internal(event: React.MouseEvent<HTMLAnchorElement>, path: string) {
+function openRemote(event: React.MouseEvent<HTMLAnchorElement>) {
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
-  event.preventDefault(); navigate(path)
+  event.preventDefault()
+  navigate(REMOTE_PATH)
 }
-function InstallCommand({ value }: { value: string }) {
-  const [copied, setCopied] = useState(false)
-  return <div className="plugin-install-command"><code>{value}</code><button type="button" aria-label="复制" title="复制" onClick={() => { void navigator.clipboard.writeText(value).then(() => { setCopied(true); window.setTimeout(() => setCopied(false), 1800) }) }}>{copied ? <CheckCircleOutlined /> : <CopyOutlined />}</button></div>
+
+function InstallCommand() {
+  const [status, setStatus] = useState<'idle' | 'copied' | 'error'>('idle')
+  const resetTimer = useRef<ReturnType<typeof setTimeout>>()
+  const mounted = useRef(true)
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false; clearTimeout(resetTimer.current) }
+  }, [])
+
+  async function copy() {
+    clearTimeout(resetTimer.current)
+    try {
+      await navigator.clipboard.writeText(DSH_COMMAND)
+      if (!mounted.current) return
+      setStatus('copied')
+      resetTimer.current = setTimeout(() => setStatus('idle'), 2000)
+    } catch { if (mounted.current) setStatus('error') }
+  }
+
+  return <>
+    <div className="landing-command">
+      <code>{DSH_COMMAND}</code>
+      <button type="button" onClick={() => void copy()} aria-label={status === 'copied' ? '已复制安装命令' : '复制安装命令'} title={status === 'copied' ? '已复制' : '复制命令'}>
+        {status === 'copied' ? <CheckOutlined /> : <CopyOutlined />}
+      </button>
+    </div>
+    <span className="sr-only" role="status">{status === 'copied' ? '安装命令已复制' : ''}</span>
+    {status === 'error' && <p className="landing-copy-error" role="alert">复制失败，请选中命令手动复制。</p>}
+  </>
 }
+
 export function HomePage() {
-  const [panel, setPanel] = useState<'install' | 'pair'>('install'); const install = panel === 'install'
-  return <div className="site-shell landing-shell">
-    <Layout.Header className="topbar marketing-topbar site-topbar"><div className="topbar-inner"><div className="topbar-brand-group"><a className="topbar-brand" href="/" aria-label="DeepSeek Harness Remote 首页"><img className="topbar-brand-mark" src="/brand-whale.webp" alt="" width="40" height="40" /><span className="topbar-brand-word">DeepSeek Harness Remote</span></a><div className="topbar-public-links"><a className="topbar-github-link" href={REPOSITORY} target="_blank" rel="noreferrer">GitHub</a><a className="topbar-primary-action" href="/app/login" onClick={event => internal(event, '/app/login')}>开始使用</a></div></div><div className="topbar-actions"><ThemeToggle /></div></div></Layout.Header>
-    <Layout.Content className="home-content"><main className="home-page"><section className="landing-hero" aria-labelledby="landing-title"><div className="landing-hero-inner"><div className="landing-hero-copy"><h1 id="landing-title">一次连接，随时可用。</h1><p className="landing-hero-sub">让手机或另一台电脑安全连接到运行 DeepSeek Harness 的工作电脑，随时查看进度并继续工作。</p><div className="landing-hero-actions"><a className="landing-action landing-action-primary" href="/app/login" onClick={event => internal(event, '/app/login')}>开始使用</a><a className="landing-action landing-action-secondary" href={REPOSITORY} target="_blank" rel="noreferrer">了解项目</a></div><a className="landing-hero-repository" href={REPOSITORY} target="_blank" rel="noreferrer"><GithubOutlined /><span>查看 GitHub 项目</span><RightOutlined /></a><p className="landing-hero-workspace-note">Remote 同时支持 DSH 工作区与 CodeX 工作区。</p></div>
-    <aside className="landing-plugin" aria-label="Remote 插件接入"><div className="landing-plugin-tabs" role="tablist"><button type="button" className={install ? 'is-active' : ''} onClick={() => setPanel('install')}>安装插件</button><button type="button" className={!install ? 'is-active' : ''} onClick={() => setPanel('pair')}>连接工作电脑</button></div><div className="landing-plugin-panel">{install ? <section className="landing-plugin-pane is-active"><div className="landing-plugin-heading"><div className="landing-plugin-meta"><ApiOutlined /><span className="landing-plugin-status">当前版本 v0.5.2</span></div><h2>支持 DeepSeek Harness 桌面版</h2></div><p className="landing-plugin-description">DeepSeek Harness 桌面版已支持 Remote。需要手动安装时，请在 DSH profile 中使用下面的固定版本。</p><div className="plugin-install-schemes"><section className="plugin-install-scheme is-recommended"><div className="plugin-install-scheme-heading"><span className="plugin-install-scheme-label">命令行</span><div><h3>安装固定版本</h3><span>使用 ds-harness-remote@0.5.2</span></div></div><div className="plugin-install-methods"><div className="plugin-install-method"><div className="plugin-install-method-heading"><span>DSH 命令</span></div><InstallCommand value={DSH_COMMAND} /></div></div></section></div></section> : <section className="landing-plugin-pane is-active"><div className="landing-plugin-heading"><div className="landing-plugin-meta"><LinkOutlined /><span className="landing-plugin-status">已经安装插件？</span></div><h2>连接你的工作电脑</h2></div><p className="landing-plugin-description">在工作电脑上启动 DeepSeek Harness，然后在 Remote 插件中完成账号授权。</p><ol className="landing-plugin-steps"><li><CheckCircleOutlined />启动工作电脑上的 DeepSeek Harness</li><li><CheckCircleOutlined />安装并启用 Remote 插件</li><li><CheckCircleOutlined />完成账号授权后即可连接</li></ol><a className="landing-plugin-action" href="/app/login" onClick={event => internal(event, '/app/login')}>打开登录页面 <RightOutlined /></a></section>}</div></aside></div></section>
-    <section className="landing-security" aria-labelledby="security-title"><div className="landing-security-inner"><div className="landing-security-heading"><h2 id="security-title">安全连接，代码仍留在你的电脑上</h2><p>Remote 只传输经过授权的加密业务数据。</p></div><dl className="landing-security-list"><div><dt>工作区不离开电脑</dt><dd>源码和工作区文件保留在 Host 上。</dd></div><div><dt>设备明确可见</dt><dd>登录后可查看已授权设备及在线状态。</dd></div><div><dt>连接端到端加密</dt><dd>只有经过授权的设备可以继续工作。</dd></div></dl></div></section></main></Layout.Content><SiteFooter /></div>
+  return <div className="landing-shell">
+    <a className="landing-skip" href="#landing-main">跳转到主要内容</a>
+    <header className="landing-header">
+      <div className="landing-container landing-header-inner">
+        <a className="landing-brand" href="/" aria-label="DeepSeek Harness Remote 首页">
+          <span className="landing-brand-mark" aria-hidden="true" />
+          <span>DeepSeek Harness Remote</span>
+        </a>
+        <nav className="landing-nav" aria-label="主导航">
+          <a className="landing-nav-github" href={REPOSITORY_URL} target="_blank" rel="noreferrer"><GithubOutlined /><span>GitHub</span></a>
+          <a className="landing-nav-start" href={REMOTE_PATH} onClick={openRemote}>开始使用</a>
+          <ThemeToggle />
+        </nav>
+      </div>
+    </header>
+
+    <main id="landing-main" className="landing-container" tabIndex={-1}>
+      <section className="landing-intro" aria-labelledby="landing-title">
+        <div className="landing-copy">
+          <p className="landing-eyebrow"><LockOutlined />自部署远程连接</p>
+          <h1 id="landing-title">随时连接，<br />继续你的工作。</h1>
+          <p className="landing-description">通过手机或另一台电脑，安全访问工作电脑上的 DeepSeek Harness。</p>
+          <div className="landing-actions">
+            <a className="landing-button landing-button-primary" href={REMOTE_PATH} onClick={openRemote}>开始使用<ArrowRightOutlined /></a>
+            <a className="landing-button landing-button-secondary" href={REPOSITORY_URL} target="_blank" rel="noreferrer"><GithubOutlined />查看源码</a>
+          </div>
+          <p className="landing-workspaces">支持 DSH 与 Codex 工作区</p>
+        </div>
+
+        <aside className="landing-setup" aria-labelledby="landing-setup-title">
+          <h2 id="landing-setup-title">连接工作电脑</h2>
+          <ol className="landing-setup-steps">
+            <li>
+              <h3>安装并启用 Remote 插件</h3>
+              <InstallCommand />
+            </li>
+            <li>
+              <h3>完成账号授权</h3>
+              <p>在工作电脑上启动 DeepSeek Harness，然后在 Remote 插件中登录账号。</p>
+            </li>
+          </ol>
+        </aside>
+      </section>
+
+      <section className="landing-features" aria-label="安全与设备管理">
+        <dl>
+          <div><dt>端到端加密</dt><dd>业务内容仅对已授权设备可见。</dd></div>
+          <div><dt>工作区保留在本机</dt><dd>源码与文件无需上传到服务器。</dd></div>
+          <div><dt>设备授权可管理</dt><dd>查看在线状态，移除不再使用的设备。</dd></div>
+        </dl>
+      </section>
+    </main>
+
+    <footer className="landing-container landing-footer">
+      <span>© DSH Remote</span>
+      <a href="https://www.zhihu.com/people/codelover" target="_blank" rel="noreferrer">原项目作者 李国宝</a>
+    </footer>
+  </div>
 }
