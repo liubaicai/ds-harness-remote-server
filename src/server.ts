@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { deviceRegistrationRequestSchema, deviceRefreshRequestSchema } from './protocol/index.js'
-import { ApiError, Store, equal, hash, secret } from './store.js'
+import { ACCOUNT_SESSION_TTL_SECONDS, ApiError, Store, equal, hash } from './store.js'
 import { createClientIpResolver } from './client-ip.js'
 import { Gateway } from './gateway.js'
 import { credentialLabel, iceServersFor, normalizeIceConfig, type IceConfig } from './ice.js'
@@ -92,7 +92,6 @@ export function createRemoteServer(config: Config) {
   }
   const assets = readAssets(config.publicDir ?? defaultPublicDir)
   const clientIp = createClientIpResolver(config.trustedProxies)
-  const sessions = new Map<string, number>()
   const limits = new Map<string, { count: number; until: number }>()
   function rate(key: string, max: number) {
     for (const [k, v] of limits) if (v.until < Date.now()) limits.delete(k)
@@ -106,8 +105,7 @@ export function createRemoteServer(config: Config) {
     return /(?:^|;\s*)dsh_session=([A-Za-z0-9_-]+)/.exec(req.headers.cookie ?? '')?.[1] ?? ''
   }
   function accountAuth(req: IncomingMessage) {
-    const key = hash(token(req))
-    if ((sessions.get(key) ?? 0) <= Date.now()) { sessions.delete(key); throw new ApiError('ACCOUNT_AUTH_REQUIRED', 401) }
+    store.authenticateAccountSession(token(req))
   }
   function deviceAuth(req: IncomingMessage) {
     if (!req.headers.authorization?.startsWith('Bearer ')) throw new ApiError('AUTH_REQUIRED', 401)
@@ -160,16 +158,13 @@ export function createRemoteServer(config: Config) {
       rate(`login:${clientIp(req)}`, 20)
       const credentials = loginSchema.parse(await body(req))
       if (!equal(credentials.email.trim(), store.account) || !equal(credentials.password, config.password)) throw new ApiError('AUTH_INVALID', 401)
-      for (const [key, expires] of sessions) if (expires <= Date.now()) sessions.delete(key)
-      if (sessions.size >= 256) throw new ApiError('RATE_LIMITED', 429)
-      const value = secret(), expiresAt = Date.now() + 8 * 3600_000
-      sessions.set(hash(value), expiresAt)
-      res.setHeader('Set-Cookie', cookie(value, 8 * 3600))
+      const { token: value, expiresAt } = store.issueAccountSession()
+      res.setHeader('Set-Cookie', cookie(value, ACCOUNT_SESSION_TTL_SECONDS))
       json(res, 200, { ...profile(), token: value, expiresAt }); return
     }
     if (method === 'GET' && path === '/api/v1/auth/me') { accountAuth(req); json(res, 200, profile()); return }
     if (method === 'POST' && path === '/api/v1/auth/logout') {
-      sessions.delete(hash(token(req))); res.setHeader('Set-Cookie', cookie('', 0)); json(res, 200, { status: 'ok' }); return
+      store.revokeAccountSession(token(req)); res.setHeader('Set-Cookie', cookie('', 0)); json(res, 200, { status: 'ok' }); return
     }
     if (method === 'GET' && path === '/api/v1/account/devices') {
       accountAuth(req); json(res, 200, { items: store.list().map(descriptor), serverUrl: url.origin, transport: webrtc ? 'auto' : 'relay' }); return

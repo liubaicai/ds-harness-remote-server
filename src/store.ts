@@ -7,12 +7,13 @@ import { z } from 'zod'
 export class ApiError extends Error {
   constructor(readonly code: string, readonly status = 400) { super(code) }
 }
+export const ACCOUNT_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 export const hash = (value: string): string => createHash('sha256').update(value).digest('hex')
 export const secret = (): string => randomBytes(32).toString('base64url')
 export const equal = (left: string, right: string): boolean => timingSafeEqual(Buffer.from(hash(left)), Buffer.from(hash(right)))
 const tokenSchema = z.object({ kind: z.enum(['access', 'refresh']), deviceId: z.string(), expires: z.number(), used: z.boolean() })
 const savedDeviceSchema = z.object({ descriptor: accountDeviceDescriptorSchema, revoked: z.boolean(), lastSeenAt: z.number() })
-const stateSchema = z.object({ version: z.literal(1), account: z.string(), salt: z.string(), verifier: z.string(), devices: z.record(savedDeviceSchema), tokens: z.record(tokenSchema), deletedDevices: z.record(z.literal(true)).default({}) })
+const stateSchema = z.object({ version: z.literal(1), account: z.string(), salt: z.string(), verifier: z.string(), devices: z.record(savedDeviceSchema), tokens: z.record(tokenSchema), deletedDevices: z.record(z.literal(true)).default({}), accountSessions: z.record(z.number().finite()).default({}) })
 type SavedDevice = z.infer<typeof savedDeviceSchema>
 
 /** Single-process store. Only token digests and public identities reach disk. */
@@ -23,9 +24,13 @@ export class Store {
     const previous = existsSync(file) ? stateSchema.parse(JSON.parse(readFileSync(file, 'utf8'))) : undefined
     const salt = previous?.salt ?? secret()
     const verifier = scryptSync(password, salt, 32).toString('hex')
-    this.state = previous ?? { version: 1, account, salt, verifier, devices: {}, tokens: {}, deletedDevices: {} }
+    this.state = previous ?? { version: 1, account, salt, verifier, devices: {}, tokens: {}, deletedDevices: {}, accountSessions: {} }
     if (this.state.account !== account) { this.state.devices = {}; this.state.deletedDevices = {} }
-    if (this.state.account !== account || !equal(this.state.verifier, verifier)) this.state.tokens = {}
+    if (this.state.account !== account || !equal(this.state.verifier, verifier)) {
+      this.state.tokens = {}
+      this.state.accountSessions = {}
+    }
+    this.pruneAccountSessions()
     Object.assign(this.state, { account, verifier })
     this.save()
   }
@@ -34,6 +39,29 @@ export class Store {
     const tmp = `${this.file}.tmp`
     writeFileSync(tmp, JSON.stringify(this.state), { mode: 0o600 })
     renameSync(tmp, this.file)
+  }
+  private pruneAccountSessions(): void {
+    for (const [key, expires] of Object.entries(this.state.accountSessions)) {
+      if (expires <= Date.now()) delete this.state.accountSessions[key]
+    }
+  }
+  issueAccountSession(): { token: string; expiresAt: number } {
+    this.pruneAccountSessions()
+    if (Object.keys(this.state.accountSessions).length >= 256) throw new ApiError('RATE_LIMITED', 429)
+    const token = secret(), expiresAt = Date.now() + ACCOUNT_SESSION_TTL_SECONDS * 1000
+    this.state.accountSessions[hash(token)] = expiresAt
+    this.save()
+    return { token, expiresAt }
+  }
+  authenticateAccountSession(token: string): void {
+    if ((this.state.accountSessions[hash(token)] ?? 0) <= Date.now()) throw new ApiError('ACCOUNT_AUTH_REQUIRED', 401)
+  }
+  revokeAccountSession(token: string): void {
+    const key = hash(token)
+    if (Object.hasOwn(this.state.accountSessions, key)) {
+      delete this.state.accountSessions[key]
+      this.save()
+    }
   }
   get(id: string): SavedDevice {
     const d = Object.hasOwn(this.state.devices, id) ? this.state.devices[id] : undefined
