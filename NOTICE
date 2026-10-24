@@ -1,0 +1,26 @@
+DS Harness Remote — Self-hosted Server (standalone)
+====================================================
+
+Copyright (c) 2026 DSH Remote contributors
+Licensed under the MIT License. See LICENSE.
+
+This project is derived from liguobao/ds-harness-remote
+(https://github.com/liguobao/ds-harness-remote), baseline commit
+4d888ad3e359416836072796d06348eba37eccc6.
+
+Vendored sources
+----------------
+The following files are copies of upstream sources, kept unchanged apart from
+import specifiers so they can be re-synced by copying the files again:
+
+  src/protocol/index.ts        <- packages/protocol/src/index.ts
+  src/protocol/loopback.ts     <- packages/protocol/src/loopback.ts
+  tests/support/crypto/index.ts  <- packages/crypto/src/index.ts
+  tests/support/crypto/noise.ts  <- packages/crypto/src/noise.ts
+  tests/support/test-scenarios.mjs <- scripts/test-scenarios.mjs
+
+web/ is a copy of apps/server/web, including web/UPSTREAM.md which records the
+provenance of the UI sources.
+
+Behavioural changes relative to upstream apps/server are documented in
+README.md ("What differs from upstream").

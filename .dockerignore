@@ -1,0 +1,11 @@
+node_modules
+dist
+data
+.git
+.gitignore
+.vitest-cache
+coverage
+*.log
+.env
+README.md
+README.zh.md
