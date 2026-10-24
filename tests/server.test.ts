@@ -134,6 +134,42 @@ describe('account and device authorization', () => {
     expect((await request('/devices/register-owned-role', 'POST', { v: 1, device: descriptor }, h.accessToken)).status).toBe(409)
     expect((await request('/devices/register-owned-role', 'POST', { v: 1, device: descriptor }, c.accessToken)).status).toBe(200)
   })
+  it('rejects delegated re-registration of an existing device identity', async () => {
+    const h = await device('host'), c = await device()
+    // The public descriptor is readable, but a client must not be able to
+    // rotate the Host's credentials through register-owned-role.
+    const publicDescriptor = await request(`/devices/${h.deviceId}`, 'GET', undefined, c.accessToken)
+    const { deviceId, identityKey, name, role, platform, clientVersion } = publicDescriptor.data
+    const attempt = await request('/devices/register-owned-role', 'POST', { v: 1, device: { deviceId, identityKey, name, role, platform, clientVersion } }, c.accessToken)
+    expect(attempt.status).toBe(409)
+    expect(attempt.data.error.code).toBe('REQUEST_CONFLICT')
+    expect((await request('/me', 'GET', undefined, h.accessToken)).status).toBe(200)
+  })
+  it('deletes a device from the account and tombstones its identity', async () => {
+    const d = await device('host'), wire = await socket(d); await wire.next('hello.ack')
+    const closed = once(wire.ws, 'close')
+    expect((await request(`/account/devices/${d.deviceId}`, 'DELETE')).status).toBe(401)
+    expect((await request(`/account/devices/${randomUUID()}`, 'DELETE', undefined, accountToken)).status).toBe(404)
+    expect((await request(`/account/devices/${d.deviceId}`, 'DELETE', undefined, accountToken)).status).toBe(200)
+    await closed
+    expect((await request('/me', 'GET', undefined, d.accessToken)).status).toBe(401)
+    expect((await request('/auth/refresh', 'POST', { deviceId: d.deviceId, refreshToken: d.refreshToken })).status).toBe(404)
+    const remaining = await request('/account/devices', 'GET', undefined, accountToken)
+    expect(remaining.data.items.map((item: { deviceId: string }) => item.deviceId)).not.toContain(d.deviceId)
+    // The identity stays tombstoned: the stale descriptor cannot register again.
+    const descriptor = { deviceId: d.deviceId, identityKey: d.identityKey, name: d.name, role: d.role, platform: d.platform, clientVersion: d.clientVersion }
+    expect((await request('/devices/register', 'POST', { v: 1, device: descriptor }, accountToken)).data.error.code).toBe('DEVICE_REVOKED')
+  })
+  it('separates login rate buckets per client behind a trusted proxy', async () => {
+    await app.close()
+    await start(password, { trustedProxies: ['127.0.0.1'] })
+    accountToken = (await request('/auth/login', 'POST', { email: account, password })).data.token
+    for (let n = 0; n < 21; n++) await request('/auth/login', 'POST', { email: account, password: 'wrong' }, undefined, { 'X-Forwarded-For': '198.51.100.10' })
+    const attacker = await request('/auth/login', 'POST', { email: account, password: 'wrong' }, undefined, { 'X-Forwarded-For': '198.51.100.10' })
+    const victim = await request('/auth/login', 'POST', { email: account, password }, undefined, { 'X-Forwarded-For': '203.0.113.20' })
+    expect(attacker.status).toBe(429)
+    expect(victim.status).toBe(200)
+  })
   it('persists credentials as digests, rotates refresh tokens and revokes a reused family', async () => {
     const d = await device()
     const saved = readFileSync(join(dir, 'state.json'), 'utf8')

@@ -28,6 +28,16 @@ Open <http://localhost:8080>. Device credentials persist in the `server-data` vo
 
 Put an HTTPS reverse proxy in front of it instead of exposing the Node listener directly. The proxy must support WebSocket Upgrade at `/ws/v1/connect` with an idle timeout above 75 seconds.
 
+### Reverse proxy security
+
+By default the Server ignores `X-Forwarded-For` and uses the socket peer for login throttling and audit addresses. Set `DSH_SERVER_TRUSTED_PROXIES` to a comma-separated list of **exact IP addresses or CIDRs of your own proxies**, for example `127.0.0.1,::1` for a same-host proxy. Docker may expose a bridge gateway as the peer instead: configure the actual observed proxy address, not an assumed loopback address. Invalid entries fail startup. Do not use public/client networks or trust-all ranges (`0.0.0.0/0`, `::/0`).
+
+The Server consults XFF only when the immediate socket peer is trusted, then walks the chain **right to left**, stopping at the first untrusted address. IPv4-mapped IPv6 addresses are normalized to IPv4; malformed chains fall back to the socket peer. Your trusted proxy must overwrite XFF with the actual peer (a single edge proxy can use nginx `proxy_set_header X-Forwarded-For $remote_addr;`) or append the actual connecting peer to a properly managed chain. Never blindly forward an attacker-supplied header. Restrict direct access to the backend with bind/firewall rules; the allowlist is not a substitute for that restriction. A shared unconfigured proxy makes all clients share one login-throttle bucket.
+
+### Delete a paired device
+
+The account-authenticated endpoint `DELETE /api/v1/account/devices/:id` returns `200 {"status":"deleted"}`. Authenticate with the account session cookie or account bearer token, not a device token. Deletion removes the device and its tokens, disconnects its active WebSocket, and frees a slot in the 256-device limit. Already-revoked devices can also be deleted (the device list only shows active devices). A minimal deleted-ID tombstone remains to prevent old device credentials from re-registering that identity: to pair the device again, create a new device ID and repeat pairing. Deletion does not erase remote files or data on the Host.
+
 ## Local setup
 
 Requires Node.js 22 and pnpm 9.15.4. Everything runs from the repository root — there is no workspace, `apps/` or `packages/` layout any more:
@@ -61,6 +71,7 @@ Set the same Server URL on your Host and Client, then sign in with the same acco
 | `DSH_SERVER_HOST` | Listen / port-binding address; default `127.0.0.1`, use `0.0.0.0` for LAN access |
 | `DSH_SERVER_PORT` | Default `8080` |
 | `DSH_SERVER_DATA_FILE` | Default `data/state.json`, relative to the working directory |
+| `DSH_SERVER_TRUSTED_PROXIES` | Comma-separated exact proxy IPs/CIDRs; default empty (ignore XFF); trust only controlled proxies |
 | `DSH_SERVER_WEBRTC` | Broker LAN/P2P/TURN instead of Relay only; default `1`, set `0` to force Relay |
 | `DSH_SERVER_STUN_URLS` | Comma-separated STUN URLs; default `stun:stun.miwifi.com:3478,stun:stun.cloudflare.com:3478`, empty disables STUN |
 | `DSH_SERVER_STUN_PROBE` | Probe STUN reachability at startup and try the fastest first; default `1`, set `0` to disable |
@@ -122,7 +133,7 @@ Open `3478/tcp`, `3478/udp`, `5349/tcp`, and the relay range `49160-49200/udp`. 
 
 Credentials follow the coturn REST convention — `username=<expiry>:<label>`, `credential=base64(HMAC-SHA1(secret, username))` — so they expire after `DSH_SERVER_TURN_TTL` seconds and are only issued to the two devices of a live connection. Static `DSH_SERVER_TURN_USERNAME`/`DSH_SERVER_TURN_PASSWORD` work too but grant standing relay access.
 
-`docker compose --profile turn up -d` starts the bundled coturn on a Linux host (it needs host networking for the relay port range). On Docker Desktop run coturn on the host instead.
+`docker compose --profile turn up -d` starts the bundled coturn on a Linux host (it needs host networking for the relay port range). Set a strong, nonempty `DSH_SERVER_TURN_SECRET` first: the coturn container exits before starting the relay if the secret is missing or empty. Ordinary `docker compose up -d` does not require a TURN secret because the profile is optional. Static username/password credentials are passed through to the Server for an external TURN service; they do not replace the bundled profile's shared-secret requirement. An explicitly empty `DSH_SERVER_STUN_URLS=` is preserved in Compose too. On Docker Desktop run coturn on the host instead.
 
 ## What differs from upstream
 
@@ -155,7 +166,7 @@ compose.yaml        Server (+ optional coturn profile)
 pnpm test        # vitest run
 ```
 
-The suite covers account/device authorization, credential rotation and revocation, Control-frame validation, end-to-end encrypted Relay (real Noise IK), relay authorization and replay handling, WebRTC brokering (signaling fan-out, unnegotiated transports, third-party injection), TURN credential minting, and the STUN probe.
+The suite covers account/device authorization, credential rotation, revocation and deletion, trusted-proxy/XFF anti-spoofing (IPv4/IPv6), Control-frame validation, end-to-end encrypted Relay (real Noise IK), relay authorization and replay handling, WebRTC brokering (signaling fan-out, unnegotiated transports, third-party injection), TURN credential minting, and the STUN probe. Compose regression tests additionally render configuration when the Docker Compose CLI is installed (no daemon needed), and execute the missing-secret guard when a POSIX shell is available; those integration checks are skipped when their tools are unavailable.
 
 ## Keeping in sync with upstream
 

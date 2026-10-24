@@ -943,8 +943,8 @@ export const helloPayloadSchema = z.object({
   accessToken: z.string().min(1),
   protocols: z.array(z.number().int().nonnegative().safe()).min(1).refine(uniqueNumbers),
   capabilities: z.array(z.string().min(1)).refine(uniqueStrings),
-  clientVersion: z.string().optional(),
-  harnessVersion: z.string().optional(),
+  clientVersion: deviceVersionSchema.optional(),
+  harnessVersion: deviceVersionSchema.optional(),
 })
 
 export const helloAckPayloadSchema = z.object({
@@ -985,7 +985,7 @@ export function parseRemoteWorkspaceTypes(value: unknown): RemoteWorkspaceTypeDe
 
 export const connectRequestPayloadSchema = z.object({
   hostDeviceId: z.string().min(1),
-  preferredTransports: z.array(transportEnum).min(1),
+  preferredTransports: z.array(transportEnum).min(1).max(4).refine(uniqueStrings),
 })
 
 export const connectIncomingPayloadSchema = z.object({
@@ -993,7 +993,7 @@ export const connectIncomingPayloadSchema = z.object({
   clientDeviceId: z.string().min(1),
   clientIdentityKey: z.string().min(1),
   authorization: z.literal('account'),
-  preferredTransports: z.array(transportEnum).min(1),
+  preferredTransports: z.array(transportEnum).min(1).max(4).refine(uniqueStrings),
 })
 
 export const connectAcceptedPayloadSchema = z.object({

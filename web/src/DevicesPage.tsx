@@ -1,8 +1,8 @@
 // Simplified upstream HostsPage + product AppHeader. No remote/open/admin actions.
-import { Alert, Button, Card, Empty, Layout, Space, Table, Tag, Typography } from 'antd'
+import { Alert, Button, Card, Empty, Layout, Popconfirm, Space, Table, Tag, Typography } from 'antd'
 import { GithubOutlined } from '@ant-design/icons'
 import type { TableColumnsType } from 'antd'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, RequestError, type Device, type DeviceList } from './api'
 import { ThemeToggle } from './ThemeToggle'
 import { SiteFooter } from './SiteFooter'
@@ -13,7 +13,10 @@ export function DevicesPage({ account, onSignedOut }: { account: string; onSigne
   const [loggingOut, setLoggingOut] = useState(false)
   const [error, setError] = useState('')
   const [updated, setUpdated] = useState('')
+  const deletingRef = useRef(new Set<string>())
+  const [deleting, setDeleting] = useState<ReadonlySet<string>>(new Set())
   const load = useCallback(async () => {
+    if (deletingRef.current.size) return
     setLoading(true); setError('')
     try { const data = await api<DeviceList>('/account/devices'); setResult(data); setUpdated(new Date().toLocaleTimeString('zh-CN')) }
     catch (err) { if (err instanceof RequestError && err.status === 401) onSignedOut(); else setError(err instanceof Error ? err.message : '加载失败，请重试。') }
@@ -26,6 +29,22 @@ export function DevicesPage({ account, onSignedOut }: { account: string; onSigne
     catch (err) { setError(err instanceof Error ? err.message : '退出失败，请重试。') }
     finally { setLoggingOut(false) }
   }
+  async function deleteDevice(deviceId: string) {
+    if (loading || deletingRef.current.has(deviceId)) return
+    deletingRef.current.add(deviceId)
+    setDeleting(new Set(deletingRef.current)); setError('')
+    try {
+      await api<{ status: 'deleted' }>(`/account/devices/${encodeURIComponent(deviceId)}`, undefined, 'DELETE')
+      setResult(current => current ? { ...current, items: current.items.filter(device => device.deviceId !== deviceId) } : current)
+      setUpdated(new Date().toLocaleTimeString('zh-CN'))
+    } catch (err) {
+      if (err instanceof RequestError && err.status === 401) onSignedOut()
+      else setError(err instanceof Error ? err.message : '删除失败，请重试。')
+    } finally {
+      deletingRef.current.delete(deviceId)
+      setDeleting(new Set(deletingRef.current))
+    }
+  }
   const devices = [...(result?.items ?? [])].sort((a, b) => Number(b.online) - Number(a.online))
   const columns: TableColumnsType<Device> = [
     { title: '设备名称', dataIndex: 'name', key: 'name', render: (name: string, d) => <Space size={10}><span className={`host-status-dot ${d.online ? 'is-online' : ''}`} /><Text strong className="selfhost-device-name">{name}</Text></Space> },
@@ -34,12 +53,21 @@ export function DevicesPage({ account, onSignedOut }: { account: string; onSigne
     { title: '系统', dataIndex: 'platform', key: 'platform', render: (platform: string) => ({ darwin: 'macOS', win32: 'Windows', linux: 'Linux', android: 'Android' })[platform] ?? platform },
     { title: '插件版本', dataIndex: 'clientVersion', key: 'clientVersion' },
     { title: 'Harness 版本', dataIndex: 'harnessVersion', key: 'harnessVersion', render: (value?: string) => value || '—' },
+    { title: '操作', key: 'actions', render: (_, device) => <Popconfirm
+      title="删除此设备？"
+      description={device.online ? '设备在线，删除后将立即断开连接。' : '删除后将从设备列表移除。'}
+      okText="删除" cancelText="取消"
+      okButtonProps={{ danger: true, loading: deleting.has(device.deviceId) }}
+      cancelButtonProps={{ disabled: deleting.has(device.deviceId) }}
+      disabled={loading || deleting.has(device.deviceId)}
+      onConfirm={() => deleteDevice(device.deviceId)}
+    ><Button type="text" danger size="small" loading={deleting.has(device.deviceId)} disabled={loading} aria-label={`删除设备 ${device.name}`}>删除</Button></Popconfirm> },
   ]
   return <>
     <Layout.Header className="topbar product-topbar"><div className="topbar-inner"><div className="topbar-brand-group is-product"><a className="topbar-brand" href="/" aria-label="返回首页"><img className="topbar-brand-mark" src="/brand-whale.webp" alt="" width="40" height="40" /><span className="topbar-brand-copy"><Title level={3}>DeepSeek Harness Remote</Title><small>安全远程访问</small></span></a></div><div className="topbar-actions"><a className="topbar-github-link product-github-link" href="https://github.com/liguobao/dsh-harness-remote" target="_blank" rel="noreferrer" aria-label="GitHub"><GithubOutlined /> GitHub</a><ThemeToggle /><Button type="text" loading={loggingOut} onClick={() => void logout()}>退出登录</Button></div></div></Layout.Header>
     <Layout.Content className="product-content selfhost-content" id="main-content">
       <div className="app-area"><div className="workspace-view"><div className="hosts-page">
-        <header className="workspace-page-header"><div><Title level={2}>我的设备</Title><Paragraph className="selfhost-account">{account}</Paragraph></div><Space className="workspace-page-actions" wrap><Button onClick={() => void load()} loading={loading}>刷新</Button></Space></header>
+        <header className="workspace-page-header"><div><Title level={2}>我的设备</Title><Paragraph className="selfhost-account">{account}</Paragraph></div><Space className="workspace-page-actions" wrap><Button onClick={() => void load()} loading={loading} disabled={deleting.size > 0}>刷新</Button></Space></header>
         {error && <Alert className="selfhost-error" type="error" showIcon message={error} />}
         <Card className="page-card selfhost-connection" title="服务地址"><Paragraph><Text code className="selfhost-address">{result?.serverUrl ?? '加载中…'}</Text></Paragraph><Paragraph>Host 和客户端使用此地址。</Paragraph></Card>
         <Card className="page-card hosts-list-card" title="设备状态" extra={result ? <Text type="secondary">{devices.filter(d => d.online).length} / {devices.length} 台在线</Text> : undefined}>

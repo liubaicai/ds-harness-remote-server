@@ -7,11 +7,11 @@ export interface DeviceList { items: Device[]; serverUrl: string; transport: str
 export class RequestError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
 }
-export async function api<T>(path: string, body?: unknown): Promise<T> {
+export async function api<T>(path: string, body?: unknown, method?: 'GET' | 'POST' | 'DELETE'): Promise<T> {
   let response: Response
   try {
     response = await fetch(`/api/v1${path}`, {
-      method: body === undefined ? 'GET' : 'POST',
+      method: method ?? (body === undefined ? 'GET' : 'POST'),
       credentials: 'same-origin', headers: { 'Content-Type': 'application/json' },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(10000),

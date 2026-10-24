@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import { deviceRegistrationRequestSchema, deviceRefreshRequestSchema } from './protocol/index.js'
 import { ApiError, Store, equal, hash, secret } from './store.js'
+import { createClientIpResolver } from './client-ip.js'
 import { Gateway } from './gateway.js'
 import { credentialLabel, iceServersFor, normalizeIceConfig, type IceConfig } from './ice.js'
 import { describeStunProbe, orderStunUrls, probeStunServers } from './stun-probe.js'
@@ -21,6 +22,8 @@ export interface Config {
   ice?: Partial<IceConfig>
   /** Directory holding the built Web UI. Defaults to `../dist/public`. */
   publicDir?: string
+  /** Proxy IP/CIDR allowlist whose `X-Forwarded-For` may be trusted for rate limiting. */
+  trustedProxies?: string[]
 }
 const loginSchema = z.object({ email: z.string().min(1).max(254), password: z.string().min(1).max(1024) }).strict()
 const defaultPublicDir = fileURLToPath(new URL('../dist/public/', import.meta.url))
@@ -88,6 +91,7 @@ export function createRemoteServer(config: Config) {
     }, () => undefined)
   }
   const assets = readAssets(config.publicDir ?? defaultPublicDir)
+  const clientIp = createClientIpResolver(config.trustedProxies)
   const sessions = new Map<string, number>()
   const limits = new Map<string, { count: number; until: number }>()
   function rate(key: string, max: number) {
@@ -151,9 +155,9 @@ export function createRemoteServer(config: Config) {
       res.setHeader('Content-Type', 'text/html; charset=utf-8')
       res.end(shell); return
     }
-    rate(`api:${req.socket.remoteAddress ?? ''}`, 240)
+    rate(`api:${clientIp(req)}`, 240)
     if (method === 'POST' && path === '/api/v1/auth/login') {
-      rate(`login:${req.socket.remoteAddress ?? ''}`, 20)
+      rate(`login:${clientIp(req)}`, 20)
       const credentials = loginSchema.parse(await body(req))
       if (!equal(credentials.email.trim(), store.account) || !equal(credentials.password, config.password)) throw new ApiError('AUTH_INVALID', 401)
       for (const [key, expires] of sessions) if (expires <= Date.now()) sessions.delete(key)
@@ -170,12 +174,24 @@ export function createRemoteServer(config: Config) {
     if (method === 'GET' && path === '/api/v1/account/devices') {
       accountAuth(req); json(res, 200, { items: store.list().map(descriptor), serverUrl: url.origin, transport: webrtc ? 'auto' : 'relay' }); return
     }
+    // Remove a device from the account: its tokens die, its socket drops, and
+    // the registration slot is freed. The identity stays tombstoned so a stale
+    // device token can never re-register itself under the same deviceId.
+    const removal = /^\/api\/v1\/account\/devices\/([^/]+)$/.exec(path)
+    if (method === 'DELETE' && removal) {
+      accountAuth(req)
+      store.delete(decodeURIComponent(removal[1]!))
+      json(res, 200, { status: 'deleted' }); return
+    }
     if (method === 'POST' && (path === '/api/v1/devices/register' || path === '/api/v1/devices/register-owned-role')) {
       const source = path.endsWith('register-owned-role') ? deviceAuth(req) : undefined
       if (!source) accountAuth(req)
       const { device } = deviceRegistrationRequestSchema.parse(await body(req))
       if (source && (source.descriptor.deviceId === device.deviceId || source.descriptor.role === device.role)) throw new ApiError('INVALID_MESSAGE', 409)
-      json(res, 200, store.register(device)); return
+      // Delegated registration bootstraps a brand-new device only. Accepting an
+      // existing identity here would let any client rotate the Host's
+      // credentials and take over its slot.
+      json(res, 200, store.register(device, source !== undefined)); return
     }
     if (method === 'POST' && path === '/api/v1/auth/refresh') {
       const data = deviceRefreshRequestSchema.parse(await body(req))

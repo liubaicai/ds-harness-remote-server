@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import type { Server } from 'node:http'
 import { WebSocket, WebSocketServer } from 'ws'
-import { createControlFrame, decodeControlFrame, MAX_CONTROL_FRAME_BYTES, MAX_RELAY_FRAME_BYTES, type ControlFrame, type HelloPayload, type ConnectRequestPayload, type SecureHandshakePayload, type RelayPayload, type TransportSelectedPayload } from './protocol/index.js'
+import { createControlFrame, decodeControlFrame, encodeControlFrame, MAX_CONTROL_FRAME_BYTES, MAX_RELAY_FRAME_BYTES, type ControlFrame, type HelloPayload, type ConnectRequestPayload, type SecureHandshakePayload, type RelayPayload, type TransportSelectedPayload } from './protocol/index.js'
 import { ApiError, Store } from './store.js'
 
 type TransportName = 'lan' | 'p2p' | 'turn' | 'relay'
@@ -26,6 +26,50 @@ export interface GatewayOptions {
   /** Advertised WebRTC negotiation budget before a peer falls back to Relay. */
   webrtcFallbackTimeoutMs?: number
 }
+/** Keep aligned with package.json; independent of the launch working directory. */
+export const SERVER_VERSION = '0.5.19'
+export const MAX_AUTHENTICATED_PEERS = 256
+
+/** Separate, bounded pre-authentication budget; never charges authenticated peers.
+ * Only the actual socket address is trusted (not spoofable forwarding headers).
+ * Successful hellos refund upgrade attempts so a shared reverse proxy/NAT can
+ * reconnect many legitimate devices without accumulating a rate-limit penalty.
+ */
+export class UnauthenticatedAdmission {
+  private pending = 0
+  private window = -1
+  private attempts = 0
+  private readonly addresses = new Map<string, { pending: number; window: number; attempts: number }>()
+
+  constructor(private readonly now: () => number = Date.now) {}
+
+  acquire(address: string): ((authenticated?: boolean) => void) | undefined {
+    const window = Math.floor(this.now() / 10_000)
+    if (window !== this.window) { this.window = window; this.attempts = 0 }
+    // At most 128 new addresses per window; prune stale idle entries even when
+    // clients rotate IPs, so the rate limiter cannot itself grow without bound.
+    for (const [key, value] of this.addresses) {
+      if (value.pending === 0 && value.window !== window) this.addresses.delete(key)
+    }
+    const entry = this.addresses.get(address) ?? { pending: 0, window, attempts: 0 }
+    if (entry.window !== window) { entry.window = window; entry.attempts = 0 }
+    if (this.pending >= 32 || entry.pending >= 8 || this.attempts >= 128 || entry.attempts >= 32) return undefined
+    this.addresses.set(address, entry)
+    this.pending++; entry.pending++; this.attempts++; entry.attempts++
+    let released = false
+    return (authenticated = false) => {
+      if (released) return
+      released = true
+      this.pending--; entry.pending--
+      if (authenticated) {
+        if (this.window === window) this.attempts--
+        if (entry.window === window) entry.attempts--
+        if (entry.pending === 0 && entry.attempts === 0) this.addresses.delete(address)
+      }
+    }
+  }
+}
+
 const TRANSPORT_CAPABILITIES = ['transport.lan', 'transport.p2p', 'transport.turn', 'transport.relay'] as const
 /**
  * ICE budget advertised to peers. A failed direct attempt costs at most this
@@ -45,6 +89,7 @@ export class Gateway {
   private links = new Map<string, Link>()
   private wss = new WebSocketServer({ noServer: true, maxPayload: MAX_RELAY_FRAME_BYTES, perMessageDeflate: false })
   private heartbeat: ReturnType<typeof setInterval>
+  private readonly admission = new UnauthenticatedAdmission()
   private readonly webrtc: boolean
   readonly webrtcFallbackTimeoutMs: number
   constructor(server: Server, private store: Store, origin: string, options: GatewayOptions = {}) {
@@ -52,10 +97,25 @@ export class Gateway {
     this.webrtcFallbackTimeoutMs = options.webrtcFallbackTimeoutMs ?? DEFAULT_WEBRTC_FALLBACK_TIMEOUT_MS
     store.onInvalidate = id => this.disconnect(id, 'AUTH_INVALID')
     server.on('upgrade', (req, socket, head) => {
-      if (req.url !== '/ws/v1/connect' || (req.headers.origin && req.headers.origin !== origin) || this.wss.clients.size >= 256) {
+      if (req.url !== '/ws/v1/connect' || (req.headers.origin && req.headers.origin !== origin)) {
         socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n'); return
       }
-      this.wss.handleUpgrade(req, socket, head, ws => this.accept(ws))
+      const release = this.admission.acquire(req.socket.remoteAddress ?? 'unknown')
+      if (!release) {
+        socket.end('HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nRetry-After: 10\r\n\r\n'); return
+      }
+      // handleUpgrade may reject malformed requests before creating a WebSocket.
+      const releaseOnClose = () => release()
+      socket.once('close', releaseOnClose)
+      try {
+        this.wss.handleUpgrade(req, socket, head, ws => {
+          socket.removeListener('close', releaseOnClose)
+          this.accept(ws, release)
+        })
+      } catch {
+        release()
+        socket.destroy()
+      }
     })
     this.heartbeat = setInterval(() => {
       for (const peer of this.peers.values()) {
@@ -70,7 +130,15 @@ export class Gateway {
   private send(peer: Peer, frame: ControlFrame): void {
     if (peer.ws.readyState !== WebSocket.OPEN) return
     if (peer.ws.bufferedAmount > 4 * MAX_RELAY_FRAME_BYTES) { this.disconnect(peer.id, 'SLOW_CONSUMER'); return }
-    peer.ws.send(JSON.stringify(frame))
+    // Encoding validates payloads and UTF-8 wire size before anything is sent.
+    // Never leak synchronous send/validation errors into the heartbeat timer.
+    try {
+      peer.ws.send(encodeControlFrame(frame), error => {
+        if (error && this.peers.get(peer.id) === peer) this.disconnect(peer.id, 'CONNECTION_FAILED')
+      })
+    } catch {
+      if (this.peers.get(peer.id) === peer) this.disconnect(peer.id, 'CONNECTION_FAILED')
+    }
   }
   /**
    * Transport capabilities this Server is willing to broker. WebRTC
@@ -115,12 +183,13 @@ export class Gateway {
     for (const link of this.links.values()) if (link.host === id || link.client === id) this.drop(link, code)
     if (peer) { peer.ws.close(code === 'CONNECTION_REPLACED' ? 4003 : 4001, code); setTimeout(() => peer.ws.terminate(), 1000).unref() }
   }
-  private accept(ws: WebSocket): void {
+  private accept(ws: WebSocket, release: (authenticated?: boolean) => void): void {
     let peer: Peer | undefined
     const deadline = setTimeout(() => ws.terminate(), 5000)
     let windowStart = Date.now(), frames = 0, bytes = 0
     ws.on('error', () => {})
     ws.on('close', () => {
+      release()
       clearTimeout(deadline)
       if (peer && this.peers.get(peer.id) === peer) this.disconnect(peer.id, 'CONNECTION_FAILED')
     })
@@ -141,14 +210,17 @@ export class Gateway {
           const device = this.store.authenticate(p.accessToken).descriptor
           if (device.deviceId !== p.deviceId || device.role !== p.role) throw new ApiError('AUTH_INVALID')
           if (!p.protocols.includes(1)) throw new ApiError('UNSUPPORTED_VERSION')
+          // Replacing an authenticated device remains possible at full capacity.
+          if (!this.peers.has(device.deviceId) && this.peers.size >= MAX_AUTHENTICATED_PEERS) throw new ApiError('RATE_LIMITED')
           this.disconnect(device.deviceId, 'CONNECTION_REPLACED')
           peer = { ws, id: device.deviceId, role: device.role, capabilities: p.capabilities, version: p.clientVersion ?? device.clientVersion, lastPong: Date.now() }
           this.peers.set(peer.id, peer)
+          release(true)
           clearTimeout(deadline)
           this.store.touch(peer.id, p.clientVersion, p.harnessVersion)
           this.send(peer, createControlFrame('hello.ack', {
             protocol: 1,
-            serverVersion: 'self-hosted/0.2.0',
+            serverVersion: SERVER_VERSION,
             connectionSessionId: randomUUID(),
             heartbeatIntervalMs: 25000,
             maxControlFrameBytes: MAX_CONTROL_FRAME_BYTES,
@@ -172,7 +244,11 @@ export class Gateway {
           else this.send(peer, createControlFrame('error', { code, message: code, connectionId, retryable: false }))
           return
         }
-        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(createControlFrame('error', { code, message: code, retryable: false })))
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(encodeControlFrame(createControlFrame('error', { code, message: code, retryable: false })), () => {})
+          } catch { ws.terminate() }
+        }
         if (peer) this.disconnect(peer.id, code)
         else { ws.close(4001, code); setTimeout(() => ws.terminate(), 1000).unref() }
       }
@@ -239,6 +315,7 @@ export class Gateway {
       else if (step === 2 && peer.id === link.host && link.stage === 'handshake') link.stage = 'ready'
       else throw new ApiError('INVALID_MESSAGE')
     } else if (frame.type === 'relay') {
+      if (!link.transports.includes('relay')) throw new ApiError('CAPABILITY_NOT_SUPPORTED')
       const counter = (frame.payload as RelayPayload).counter
       if (link.stage !== 'ready' || counter <= (link.counters.get(peer.id) ?? -1)) throw new ApiError('INVALID_MESSAGE')
       link.counters.set(peer.id, counter)

@@ -12,7 +12,7 @@ export const secret = (): string => randomBytes(32).toString('base64url')
 export const equal = (left: string, right: string): boolean => timingSafeEqual(Buffer.from(hash(left)), Buffer.from(hash(right)))
 const tokenSchema = z.object({ kind: z.enum(['access', 'refresh']), deviceId: z.string(), expires: z.number(), used: z.boolean() })
 const savedDeviceSchema = z.object({ descriptor: accountDeviceDescriptorSchema, revoked: z.boolean(), lastSeenAt: z.number() })
-const stateSchema = z.object({ version: z.literal(1), account: z.string(), salt: z.string(), verifier: z.string(), devices: z.record(savedDeviceSchema), tokens: z.record(tokenSchema) })
+const stateSchema = z.object({ version: z.literal(1), account: z.string(), salt: z.string(), verifier: z.string(), devices: z.record(savedDeviceSchema), tokens: z.record(tokenSchema), deletedDevices: z.record(z.literal(true)).default({}) })
 type SavedDevice = z.infer<typeof savedDeviceSchema>
 
 /** Single-process store. Only token digests and public identities reach disk. */
@@ -23,8 +23,8 @@ export class Store {
     const previous = existsSync(file) ? stateSchema.parse(JSON.parse(readFileSync(file, 'utf8'))) : undefined
     const salt = previous?.salt ?? secret()
     const verifier = scryptSync(password, salt, 32).toString('hex')
-    this.state = previous ?? { version: 1, account, salt, verifier, devices: {}, tokens: {} }
-    if (this.state.account !== account) this.state.devices = {}
+    this.state = previous ?? { version: 1, account, salt, verifier, devices: {}, tokens: {}, deletedDevices: {} }
+    if (this.state.account !== account) { this.state.devices = {}; this.state.deletedDevices = {} }
     if (this.state.account !== account || !equal(this.state.verifier, verifier)) this.state.tokens = {}
     Object.assign(this.state, { account, verifier })
     this.save()
@@ -42,8 +42,11 @@ export class Store {
     return d
   }
   list(): SavedDevice[] { return Object.values(this.state.devices).filter(d => !d.revoked) }
-  register(descriptor: AccountDeviceDescriptor): ReturnType<Store['issue']> {
+  register(descriptor: AccountDeviceDescriptor, newOnly = false): ReturnType<Store['issue']> {
+    descriptor = accountDeviceDescriptorSchema.parse(descriptor)
+    if (Object.hasOwn(this.state.deletedDevices, descriptor.deviceId)) throw new ApiError('DEVICE_REVOKED', 403)
     const old = this.state.devices[descriptor.deviceId]
+    if (newOnly && old) throw new ApiError('REQUEST_CONFLICT', 409)
     if (old?.revoked) throw new ApiError('DEVICE_REVOKED', 403)
     if (old && (old.descriptor.identityKey !== descriptor.identityKey || old.descriptor.role !== descriptor.role)) throw new ApiError('PEER_IDENTITY_MISMATCH', 409)
     if (!old && Object.keys(this.state.devices).length >= 256) throw new ApiError('RATE_LIMITED', 429)
@@ -82,6 +85,13 @@ export class Store {
     this.save()
   }
   revoke(id: string): void { this.get(id).revoked = true; this.invalidate(id) }
+  /** Remove a device entirely: its record, tokens, and its registration slot. */
+  delete(id: string): void {
+    if (!Object.hasOwn(this.state.devices, id)) throw new ApiError('DEVICE_NOT_FOUND', 404)
+    this.state.deletedDevices[id] = true
+    delete this.state.devices[id]
+    this.invalidate(id)
+  }
   touch(id: string, clientVersion?: string, harnessVersion?: string): void {
     const d = this.get(id)
     d.lastSeenAt = Date.now()

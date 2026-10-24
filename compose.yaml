@@ -11,12 +11,15 @@ services:
       DSH_SERVER_PUBLIC_URL: ${DSH_SERVER_PUBLIC_URL:-http://localhost:8080}
       # WebRTC data plane: LAN -> P2P -> TURN -> Relay. 0 keeps Relay only.
       DSH_SERVER_WEBRTC: ${DSH_SERVER_WEBRTC:-1}
-      DSH_SERVER_STUN_URLS: "${DSH_SERVER_STUN_URLS:-stun:stun.miwifi.com:3478,stun:stun.cloudflare.com:3478}"
+      DSH_SERVER_STUN_URLS: "${DSH_SERVER_STUN_URLS-stun:stun.miwifi.com:3478,stun:stun.cloudflare.com:3478}"
       # Probes the STUN endpoints at startup and tries the fastest reachable one first.
       DSH_SERVER_STUN_PROBE: ${DSH_SERVER_STUN_PROBE:-1}
       DSH_SERVER_TURN_URLS: ${DSH_SERVER_TURN_URLS:-}
       DSH_SERVER_TURN_SECRET: ${DSH_SERVER_TURN_SECRET:-}
       DSH_SERVER_TURN_TTL: ${DSH_SERVER_TURN_TTL:-3600}
+      DSH_SERVER_TURN_USERNAME: ${DSH_SERVER_TURN_USERNAME:-}
+      DSH_SERVER_TURN_PASSWORD: ${DSH_SERVER_TURN_PASSWORD:-}
+      DSH_SERVER_TRUSTED_PROXIES: ${DSH_SERVER_TRUSTED_PROXIES:-}
     volumes:
       - server-data:/data
     restart: unless-stopped
@@ -29,12 +32,25 @@ services:
     image: coturn/coturn:4.6.2
     profiles: ["turn"]
     network_mode: host
+    environment:
+      DSH_SERVER_TURN_SECRET: ${DSH_SERVER_TURN_SECRET:-}
+    # Validate inside the enabled container, not during global Compose interpolation.
+    # $$ escapes Compose substitution; the shell expands the secret without eval.
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        if [ -z "$${DSH_SERVER_TURN_SECRET}" ]; then
+          echo 'DSH_SERVER_TURN_SECRET is required for the turn profile' >&2
+          exit 1
+        fi
+        exec turnserver --static-auth-secret="$${DSH_SERVER_TURN_SECRET}" "$$@"
+      - --
     command:
       - --no-cli
       - --log-file=stdout
       - --lt-cred-mech
       - --use-auth-secret
-      - --static-auth-secret=${DSH_SERVER_TURN_SECRET:?Set DSH_SERVER_TURN_SECRET in .env}
       - --realm=${DSH_SERVER_TURN_REALM:-ds-harness-remote}
       - --fingerprint
       - --no-multicast-peers
