@@ -4,6 +4,17 @@ export interface Device {
   clientVersion: string; harnessVersion?: string; online: boolean; lastSeenAt?: number;
 }
 export interface DeviceList { items: Device[]; serverUrl: string; transport: string }
+export type TransportName = 'lan' | 'p2p' | 'turn' | 'relay'
+export interface Connection {
+  connectionId: string
+  client: { deviceId: string; name: string }
+  host: { deviceId: string; name: string }
+  stage: 'pending' | 'accepted' | 'handshake' | 'ready'
+  connectedAt: number
+  selectedTransport?: TransportName
+  hostTransport?: TransportName
+}
+export interface ConnectionList { items: Connection[] }
 export class RequestError extends Error {
   constructor(message: string, readonly status: number) { super(message) }
 }

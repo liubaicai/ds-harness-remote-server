@@ -106,7 +106,7 @@ Peers degrade through four tiers and stop at the first one that works:
 | TURN | Relayed by a TURN server, still over WebRTC | TURN endpoints plus credentials |
 | Relay | Client ↔ this Server's WebSocket ↔ Host | nothing; always available |
 
-The Server brokers the ladder instead of forcing Relay. It only:
+The Server brokers the ladder instead of forcing Relay. The account endpoint `GET /api/v1/account/connections` (and the web UI's live connections panel) shows each active link's two devices, the Client's chosen transport, and the path the Host announced (LAN/P2P/TURN/Relay) — account visibility only. It only:
 
 1. advertises `transport.lan/p2p/turn/relay` with `webrtcEnabled: true` in `hello.ack`, intersected with what the peer offered;
 2. forwards `signal.offer`, `signal.answer`, and `signal.ice` verbatim between the two devices of a connection;

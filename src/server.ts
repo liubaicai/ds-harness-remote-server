@@ -174,6 +174,15 @@ export function createRemoteServer(config: Config) {
     if (method === 'GET' && path === '/api/v1/account/devices') {
       accountAuth(req); json(res, 200, { items: store.list().map(descriptor), serverUrl: url.origin, transport: webrtc ? 'auto' : 'relay' }); return
     }
+    // Live links between devices, with the data path each pair negotiated and
+    // the one the Host announced. Account-only visibility: a device token is
+    // not enough to enumerate other devices' connections.
+    if (method === 'GET' && path === '/api/v1/account/connections') {
+      accountAuth(req)
+      const names = new Map(store.list().map(d => [d.descriptor.deviceId, d.descriptor.name]))
+      const party = (id: string) => ({ deviceId: id, name: names.get(id) ?? id })
+      json(res, 200, { items: gateway.connections().map(link => ({ ...link, host: party(link.host), client: party(link.client) })) }); return
+    }
     // Remove a device from the account: its tokens die, its socket drops, and
     // the registration slot is freed. The identity stays tombstoned so a stale
     // device token can never re-register itself under the same deviceId.

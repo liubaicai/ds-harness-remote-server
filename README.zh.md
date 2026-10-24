@@ -106,7 +106,7 @@ Host 与客户端填同一个 Server 地址，用同一账号登录。账号建�
 | TURN | 经 TURN 服务器转发，仍走 WebRTC | 有可用的 TURN 地址与凭据 |
 | Relay | 客户端 ↔ 本服务 WebSocket ↔ Host | 无需条件，始终可用 |
 
-Server 只做协商代理，不强制 Relay。它只负责：
+Server 只做协商代理，不强制 Relay。管理端 `GET /api/v1/account/connections`（及 Web 界面“活动连接”面板）展示每条活动连接的双方设备、客户端选择的通道与 Host 通告的实际路径（LAN/P2P/TURN/服务器中继），仅账号可见。它只负责：
 
 1. 在 `hello.ack` 中声明 `transport.lan/p2p/turn/relay` 与 `webrtcEnabled: true`（取对端声明与本服务支持集的交集）；
 2. 在连接双方之间原样转发 `signal.offer`、`signal.answer`、`signal.ice`；

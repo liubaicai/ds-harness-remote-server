@@ -413,6 +413,30 @@ describe('webrtc transport brokering', () => {
     relay.send('signal.offer', { connectionId, targetDeviceId: h.deviceId, sdp: 'v=0' })
     expect((await relay.next('error')).code).toBe('CAPABILITY_NOT_SUPPORTED')
   })
+  it('exposes live connections with their data path to the account only', async () => {
+    const ctx = await connection(['p2p', 'relay'])
+    expect((await request('/account/connections', 'GET')).status).toBe(401)
+    expect((await request('/account/connections', 'GET', undefined, ctx.c.accessToken)).status).toBe(401)
+    const find = async () => {
+      const list = await request('/account/connections', 'GET', undefined, accountToken)
+      return list.data.items.find((item: { connectionId: string }) => item.connectionId === ctx.connectionId)
+    }
+    const before = await find()
+    expect(before).toMatchObject({ stage: 'accepted', client: { deviceId: ctx.c.deviceId, name: 'test-device' }, host: { deviceId: ctx.h.deviceId, name: 'test-device' } })
+    expect(before.selectedTransport).toBeUndefined()
+    ctx.client.send('transport.selected', { connectionId: ctx.connectionId, targetDeviceId: ctx.h.deviceId, transport: 'p2p' })
+    await ctx.host.next('transport.selected')
+    const selected = await find()
+    expect(selected).toMatchObject({ selectedTransport: 'p2p', stage: 'accepted' })
+    ctx.host.send('transport.selected', { connectionId: ctx.connectionId, targetDeviceId: ctx.c.deviceId, transport: 'lan' })
+    await handshake(ctx)
+    const ready = await find()
+    expect(ready).toMatchObject({ selectedTransport: 'p2p', hostTransport: 'lan', stage: 'ready' })
+    ctx.client.ws.terminate()
+    const until = Date.now() + 3000
+    while ((await find()) && Date.now() < until) await new Promise(resolve => setTimeout(resolve, 50))
+    expect(await find()).toBeUndefined()
+  })
 })
 describe('ice credential endpoint', () => {
   it('issues credentials only to the two parties of a live connection', async () => {

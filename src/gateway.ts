@@ -6,15 +6,29 @@ import { ApiError, Store } from './store.js'
 
 type TransportName = 'lan' | 'p2p' | 'turn' | 'relay'
 type Peer = { ws: WebSocket; id: string; role: 'host' | 'client'; capabilities: string[]; version: string; lastPong: number; nonce?: string }
+/** One live link as exposed to the account admin view. */
+export type LinkSummary = {
+  connectionId: string
+  host: string
+  client: string
+  stage: 'pending' | 'accepted' | 'handshake' | 'ready'
+  connectedAt: number
+  selectedTransport?: TransportName
+  hostTransport?: TransportName
+}
 type Link = {
   id: string
   host: string
   client: string
   stage: 'pending' | 'accepted' | 'handshake' | 'ready'
-  created: number
+  connectedAt: number
   counters: Map<string, number>
   /** Transports both peers offered and the Server is willing to broker. */
   transports: TransportName[]
+  /** Transport the Client selected from the negotiated set. */
+  selectedTransport?: TransportName
+  /** Path the Host announced its data channel actually took. */
+  hostTransport?: TransportName
 }
 export interface GatewayOptions {
   /**
@@ -123,7 +137,7 @@ export class Gateway {
         peer.nonce = randomUUID()
         this.send(peer, createControlFrame('ping', { nonce: peer.nonce }))
       }
-      for (const link of this.links.values()) if (link.stage !== 'ready' && Date.now() - link.created > 30_000) this.drop(link, 'CONNECTION_FAILED')
+      for (const link of this.links.values()) if (link.stage !== 'ready' && Date.now() - link.connectedAt > 30_000) this.drop(link, 'CONNECTION_FAILED')
     }, 25_000)
     this.heartbeat.unref()
   }
@@ -271,7 +285,7 @@ export class Gateway {
       if (transports.length === 0) throw new ApiError('CAPABILITY_NOT_SUPPORTED')
       for (const old of this.links.values()) if (old.client === peer.id || (old.host === host.id && !modernHost(host.version))) this.drop(old, 'CONNECTION_REPLACED')
       if (this.links.size >= 256) throw new ApiError('RATE_LIMITED')
-      const link: Link = { id: randomUUID(), host: host.id, client: peer.id, stage: 'pending', created: Date.now(), counters: new Map(), transports }
+      const link: Link = { id: randomUUID(), host: host.id, client: peer.id, stage: 'pending', connectedAt: Date.now(), counters: new Map(), transports }
       this.links.set(link.id, link)
       this.send(host, createControlFrame('connect.incoming', { connectionId: link.id, clientDeviceId: peer.id, clientIdentityKey: this.store.get(peer.id).descriptor.identityKey, authorization: 'account', preferredTransports: [...transports] }))
       return
@@ -297,7 +311,12 @@ export class Gateway {
       // the set this pair negotiated. The Host only announces which path its
       // data channel actually took; the Client ignores that announcement, so a
       // mismatch must not tear down an otherwise working link.
-      if (peer.id === link.client && !link.transports.includes(selected)) throw new ApiError('CAPABILITY_NOT_SUPPORTED')
+      if (peer.id === link.client) {
+        if (!link.transports.includes(selected)) throw new ApiError('CAPABILITY_NOT_SUPPORTED')
+        link.selectedTransport = selected
+      } else {
+        link.hostTransport = selected
+      }
       if (modernHost(other.version) && link.transports.includes(selected)) this.send(other, frame)
       return
     }
@@ -326,6 +345,18 @@ export class Gateway {
   ownsLink(connectionId: string, deviceId: string): boolean {
     const link = this.links.get(connectionId)
     return link !== undefined && (link.host === deviceId || link.client === deviceId)
+  }
+  /** Live links with their negotiated data path, for the account admin view. */
+  connections(): LinkSummary[] {
+    return [...this.links.values()].map(link => ({
+      connectionId: link.id,
+      host: link.host,
+      client: link.client,
+      stage: link.stage,
+      connectedAt: link.connectedAt,
+      ...(link.selectedTransport === undefined ? {} : { selectedTransport: link.selectedTransport }),
+      ...(link.hostTransport === undefined ? {} : { hostTransport: link.hostTransport }),
+    }))
   }
   close(): void { clearInterval(this.heartbeat); for (const ws of this.wss.clients) ws.terminate(); this.wss.close() }
 }
