@@ -81,7 +81,10 @@ export class HarnessClient {
 
   /**
    * Attach to one session: returns the snapshot history and then streams live
-   * entries through `onEntry` until the handle is closed.
+   * entries through `onEntry` until the handle is closed. Tolerant of Host
+   * snapshot variations (control preludes, result envelopes, chunked frames,
+   * history replayed as live entries) — a missing snapshot degrades to an
+   * empty history instead of blocking the conversation.
    */
   async follow(
     sessionId: string,
@@ -93,40 +96,64 @@ export class HarnessClient {
     const abortForward = () => controller.abort()
     signal?.addEventListener('abort', abortForward, { once: true })
     this.followHandle = { controller }
-    const source = await this.gateway.open('session/follow', {
+    const request = {
       args: {
         request: {
           address: { kind: 'session', sessionId },
           maxMessages: 200,
         },
       },
-    }, controller.signal)
+    }
+    let source
+    try {
+      source = await this.gateway.open('session/follow', request, controller.signal, { transferFrames: true })
+    } catch (error) {
+      // Hosts whose stream schema predates `transferFrames` reject the flag.
+      if (controller.signal.aborted) throw error
+      source = await this.gateway.open('session/follow', request, controller.signal)
+    }
     this.followHandle.stream = source
     const iterator = source[Symbol.asyncIterator]()
-    const first = await iterator.next()
-    if (first.done || !isRecord(first.value) || first.value.type !== 'snapshot') {
-      await this.closeFollow(false)
-      throw new RemoteGatewayError('INVALID_MESSAGE', 'Host 返回的会话快照无效。')
+
+    // Find the snapshot, skipping control preludes; history may also arrive as
+    // ordinary event/chunk frames with no snapshot envelope at all.
+    const leading: HarnessHistoryEntry[] = []
+    let snapshot: HarnessFollowSnapshot = { entries: [], hasMore: false }
+    for (;;) {
+      const next = await iterator.next()
+      if (next.done) break
+      const value = unwrapEnvelope(next.value)
+      if (!isRecord(value)) continue
+      const records = Array.isArray(value.records) ? value.records : undefined
+      if (records !== undefined || value.type === 'snapshot') {
+        snapshot = {
+          entries: historyEntriesFromRecords(records ?? []),
+          hasMore: value.hasMore === true,
+          ...(typeof value.cursor === 'number' ? { cursor: value.cursor } : {}),
+        }
+        break
+      }
+      const entries = entriesFromFollowValue(value)
+      if (entries.length > 0) leading.push(...entries)
+      // Unknown control values (ready/baseline/…) are skipped silently.
     }
-    const snapshot = first.value
-    const cursor = typeof snapshot.cursor === 'number' ? snapshot.cursor : undefined
+
+    const pump = (entries: HarnessHistoryEntry[]) => {
+      if (entries.length > 0 && !controller.signal.aborted) onEntry(entries)
+    }
+    pump(leading)
     void (async () => {
       try {
         while (this.followHandle?.controller === controller) {
           const next = await iterator.next()
           if (next.done || this.followHandle?.controller !== controller) return
-          const entries = entriesFromFollowValue(next.value)
-          if (entries.length > 0) onEntry(entries)
+          pump(entriesFromFollowValue(unwrapEnvelope(next.value)))
         }
       } catch {
         // Stream failures end live updates; history on screen stays valid.
       }
     })()
-    return {
-      entries: historyEntriesFromRecords(Array.isArray(snapshot.records) ? snapshot.records : []),
-      hasMore: snapshot.hasMore === true,
-      ...(cursor === undefined ? {} : { cursor }),
-    }
+    return snapshot
   }
 
   async closeFollow(notifyRemote = true): Promise<void> {
@@ -269,4 +296,9 @@ function clientTimeZone(): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/** Some Host versions wrap stream values in `{ok,value}` result envelopes. */
+function unwrapEnvelope(value: unknown): unknown {
+  return isRecord(value) && value.ok === true && 'value' in value ? value.value : value
 }

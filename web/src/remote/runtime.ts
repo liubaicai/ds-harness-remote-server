@@ -215,6 +215,11 @@ export class SessionRuntime {
       await core.connect()
       this.core = core
 
+      // Compact history keeps session snapshots under the single-frame limit
+      // (the Host truncates tool output/text); without it large sessions fail
+      // to load. Same call the Android client makes; harmless on old Hosts.
+      await core.rpc('remote.history.configure', { compact: true }).catch(() => undefined)
+
       // Capability discovery drives everything below — never assume a backend.
       const features = await describeHarness(core)
       if (features.remoteGateway) this.harness = new HarnessClient(core)

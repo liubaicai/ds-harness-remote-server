@@ -35,22 +35,64 @@ export class RemoteTypertGateway {
     return unwrapResult<T>(response)
   }
 
-  async open(endpoint: string, payload: unknown, signal?: AbortSignal): Promise<RemoteGatewayStream> {
+  async open(
+    endpoint: string,
+    payload: unknown,
+    signal?: AbortSignal,
+    options?: { transferFrames?: boolean },
+  ): Promise<RemoteGatewayStream> {
     const streamId = createRemoteId()
     const queue = new AsyncValueQueue()
+    const rawQueue = new AsyncValueQueue()
     const remoteClose = { enabled: true }
     const unsubscribe = this.client.onEvent(event => {
-      if (event.event !== 'harness.remote.frame') return
-      const data = event.data as { streamId?: string; hasValue?: boolean; value?: unknown }
-      if (data.streamId === streamId && data.hasValue === true) queue.push(data.value)
+      if (event.event === 'harness.remote.frame') {
+        const data = event.data as {
+          streamId?: string
+          hasValue?: boolean
+          value?: unknown
+          transfer?: { kind?: string; transferId: string; totalBytes: number; totalChunks: number }
+        }
+        if (data.streamId !== streamId || data.hasValue !== true) return
+        rawQueue.push(data)
+        return
+      }
+      if (event.event === 'harness.remote.stream.closed') {
+        const data = event.data as { streamId?: string; reason?: string; failure?: { code?: string; message?: string } }
+        if (data.streamId !== streamId) return
+        if (data.reason === 'failed') {
+          rawQueue.fail(new RemoteGatewayError(
+            typeof data.failure?.code === 'string' ? data.failure.code : 'STREAM_FAILED',
+            typeof data.failure?.message === 'string' ? data.failure.message : 'The Harness stream failed.',
+          ))
+        } else {
+          rawQueue.close()
+        }
+      }
     })
     const unsubscribeClose = this.client.onClose(() => {
-      queue.fail(new RemoteGatewayError('TRANSPORT_CLOSED', 'The Harness stream transport closed.'))
+      rawQueue.fail(new RemoteGatewayError('TRANSPORT_CLOSED', 'The Harness stream transport closed.'))
     })
-    const onAbort = () => queue.close()
+    // Oversized frames arrive as transfer descriptors (when the Host is told it
+    // may chunk them): reassemble before handing values to the consumer.
+    void (async () => {
+      try {
+        for await (const raw of rawQueue) {
+          const data = raw as { value?: unknown; transfer?: { transferId: string; totalBytes: number; totalChunks: number } }
+          if (data.transfer) queue.push(await this.readTransferredFrame(data.transfer, signal))
+          else queue.push(data.value)
+        }
+      } catch (error) {
+        queue.fail(error instanceof Error ? error : new Error(String(error)))
+      } finally {
+        queue.close()
+      }
+    })()
+    const onAbort = () => rawQueue.close()
     signal?.addEventListener('abort', onAbort, { once: true })
+    const openParams = { streamId, endpoint, payload, ...(options?.transferFrames ? { transferFrames: true } : {}) }
     try {
-      await this.client.rpc('harness.remote.stream.open', { streamId, endpoint, payload }, signal)
+      await this.client.rpc('harness.remote.stream.open', openParams, signal)
     } catch (error) {
       signal?.removeEventListener('abort', onAbort)
       unsubscribe()
@@ -65,6 +107,7 @@ export class RemoteTypertGateway {
         signal?.removeEventListener('abort', onAbort)
         unsubscribe()
         unsubscribeClose()
+        rawQueue.close()
         queue.close()
         if (remoteClose.enabled) await this.client.rpc('harness.remote.stream.close', { streamId }).catch(() => undefined)
       }
@@ -73,9 +116,30 @@ export class RemoteTypertGateway {
       [Symbol.asyncIterator]: () => iterate(),
       close: async (notifyRemote = true) => {
         remoteClose.enabled = notifyRemote
+        rawQueue.close()
         queue.close()
         await iterate().return(undefined)
       },
+    }
+  }
+
+  private async readTransferredFrame(
+    transfer: { transferId: string; totalBytes: number; totalChunks: number },
+    signal?: AbortSignal,
+  ): Promise<unknown> {
+    const chunks: Uint8Array[] = []
+    try {
+      for (let index = 0; index < transfer.totalChunks; index += 1) {
+        const part = await this.client.rpc<{ transferId: string; index: number; data: string }>(
+          'harness.remote.transfer.read', { transferId: transfer.transferId, index }, signal,
+        )
+        chunks.push(canonicalBase64ToBytes(part.data))
+      }
+      const bytes = concat(chunks, transfer.totalBytes)
+      const frame = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)) as { value?: unknown }
+      return frame.value
+    } finally {
+      await this.client.rpc('harness.remote.transfer.close', { transferId: transfer.transferId }).catch(() => undefined)
     }
   }
 }
@@ -140,6 +204,23 @@ class AsyncValueQueue implements AsyncIterable<unknown> {
 export function createRemoteId(): string {
   if (globalThis.crypto?.randomUUID !== undefined) return globalThis.crypto.randomUUID()
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+function canonicalBase64ToBytes(value: string): Uint8Array {
+  const binary = atob(value)
+  const bytes = new Uint8Array(binary.length)
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index)
+  return bytes
+}
+
+function concat(chunks: readonly Uint8Array[], totalBytes: number): Uint8Array {
+  const output = new Uint8Array(totalBytes)
+  let offset = 0
+  for (const chunk of chunks) {
+    output.set(chunk, offset)
+    offset += chunk.byteLength
+  }
+  return output
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
