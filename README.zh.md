@@ -175,6 +175,18 @@ DSH_SERVER_TURN_SECRET=<共享密钥>
 | `GET /api/v1/account/diagnostics?connectionId=<id>` | 单条连接诊断 |
 | `GET /api/v1/account/diagnostics/export` | 下载脱敏 JSON；也支持 `connectionId` 参数 |
 
+## Web 会话（网页访问 DSH 会话）
+
+登录管理页面后，点击在线 Host 的「会话」按钮（或直接打开 `/app/sessions`），即可在浏览器里列出工作区与会话、打开历史会话、新建会话并实时对话——这补齐了官方托管版（dsh.r2049.cn）有、上游开源版没有的「网页访问 DSH 会话并交互」能力。
+
+**工作原理**：浏览器注册为一台标准 `client` 设备（`platform: browser`，X25519 身份存于 localStorage），经 `/ws/v1/connect` 建立 Relay 链路，与 Host 完成 `Noise_IK_25519_ChaChaPoly_SHA256` 端到端握手后，走与 Android/Desktop 客户端完全相同的 `agent.acp.*` 业务面：
+
+- 会话目录：`initialize`、`dsh/workspaceList`、`dsh/sessionList`、`dsh/sessionHistory`；
+- 会话交互：`session/new`、`session/load`、`session/prompt`、`session/cancel`，流式更新经 `agent.acp.stream.open` + `agent.acp.frame` 下发；
+- 权限确认：`session/request_permission` 弹卡，单次允许/拒绝经 `agent.acp.respond` 回传。
+
+服务器只做密文转发，会话内容不出浏览器与 Host 两端；会话 UI（消息流、工具卡片、审批卡片）是纯前端内存投影。Web 端 MVP 走 Relay 数据面（WebRTC 直连为后续增强），Host 侧需配置并启用 ACP 后端（`acp.enabled` / `acp.backends`），实际可用后端以 Host 的 `initialize` 应答为准。
+
 ## 与上游的差异
 
 | 位置 | 上游 | 本项目 |
@@ -193,6 +205,7 @@ DSH_SERVER_TURN_SECRET=<共享密钥>
 src/                Server 源码（HTTP、WebSocket 网关、存储、ICE）
 src/protocol/       自上游 packages/protocol 内置，即客户端所讲的线上协议
 web/                Web UI（Vite + React + Ant Design），构建到 dist/public/
+web/src/remote/     Web 会话客户端栈（设备身份、Relay 链路、Noise IK、ACP 会话）
 tests/              Vitest 测试，含内置的 Noise IK 实现
 Dockerfile          多阶段生产镜像
 compose.yaml        Server（以及可选的 coturn profile）
@@ -213,7 +226,7 @@ node web/tests/observability.browser.mjs  # 可选：真实浏览器界面检查
 
 新增服务端测试覆盖历史保留与容量、重启恢复、事件数量限制、诊断鉴权和导出白名单。
 
-覆盖范围：账号/设备授权、凭据轮换/吊销/删除、可信代理与 XFF 防伪造（IPv4/IPv6）、Control 帧校验、真实 Noise IK 的端到端加密 Relay、中继授权与重放处理、WebRTC 协商代理（信令双向转发、未协商传输被拒、第三方注入被拒）、TURN 凭据签发、STUN 探测。Compose 回归测试会在安装 Docker Compose CLI 时渲染真实配置（不需要 Docker daemon），在有 POSIX shell 时执行缺少密钥的启动保护；工具不可用时跳过这些集成检查。
+覆盖范围：账号/设备授权、凭据轮换/吊销/删除、可信代理与 XFF 防伪造（IPv4/IPv6）、Control 帧校验、真实 Noise IK 的端到端加密 Relay、中继授权与重放处理、WebRTC 协商代理（信令双向转发、未协商传输被拒、第三方注入被拒）、TURN 凭据签发、STUN 探测、Web 会话通道（浏览器设备注册、relay 选路、加密 `agent.acp.*` 往返）与 ACP 会话投影（流式消息、工具、审批、历史折叠）。Compose 回归测试会在安装 Docker Compose CLI 时渲染真实配置（不需要 Docker daemon），在有 POSIX shell 时执行缺少密钥的启动保护；工具不可用时跳过这些集成检查。
 
 ## 与上游同步
 

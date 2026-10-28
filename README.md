@@ -172,6 +172,18 @@ All new endpoints require an account cookie or account Bearer token; device toke
 | `GET /api/v1/account/diagnostics?connectionId=<id>` | Individual connection diagnostics |
 | `GET /api/v1/account/diagnostics/export` | Sanitized JSON attachment; also accepts `connectionId` |
 
+## Web sessions (browser access to DSH conversations)
+
+After signing in to the management page, click **Sessions** on an online Host (or open `/app/sessions` directly) to list workspaces and sessions in the browser, open past sessions, create new ones and chat in real time — the capability the hosted edition (dsh.r2049.cn) has and the upstream open-source build lacks.
+
+**How it works.** The browser registers as a standard `client` device (`platform: browser`, X25519 identity kept in localStorage), opens the Relay link over `/ws/v1/connect`, completes the `Noise_IK_25519_ChaChaPoly_SHA256` end-to-end handshake with the Host, and then uses exactly the same `agent.acp.*` business plane as the Android/Desktop clients:
+
+- catalog: `initialize`, `dsh/workspaceList`, `dsh/sessionList`, `dsh/sessionHistory`;
+- conversation: `session/new`, `session/load`, `session/prompt`, `session/cancel`, with streaming updates delivered via `agent.acp.stream.open` + `agent.acp.frame`;
+- approvals: `session/request_permission` cards answered once via `agent.acp.respond`.
+
+The server only relays ciphertext; conversation content never leaves the browser and the Host. The chat UI (message stream, tool cards, approval cards) is a pure in-memory frontend projection. The web MVP uses the Relay data plane (WebRTC upgrade is a follow-up), and the Host must enable an ACP backend (`acp.enabled` / `acp.backends`); the effective backend list comes from the Host's `initialize` reply.
+
 ## What differs from upstream
 
 | Area | Upstream | Here |
@@ -190,6 +202,7 @@ All new endpoints require an account cookie or account Bearer token; device toke
 src/                Server sources (HTTP, WebSocket gateway, store, ICE)
 src/protocol/       Vendored from upstream packages/protocol — the wire contract
 web/                Web UI (Vite + React + Ant Design), built into dist/public/
+web/src/remote/     Web session client stack (identity, relay link, Noise IK, ACP)
 tests/              Vitest suite, including a vendored Noise IK implementation
 Dockerfile          Multi-stage production image
 compose.yaml        Server (+ optional coturn profile)
@@ -210,7 +223,7 @@ The browser check runs an isolated loopback fixture server with mock data, cover
 
 Observability tests additionally cover retention/capacity, restart recovery, bounded event timelines, account-only authorization and diagnostic export allowlists.
 
-The suite covers account/device authorization, credential rotation, revocation and deletion, trusted-proxy/XFF anti-spoofing (IPv4/IPv6), Control-frame validation, end-to-end encrypted Relay (real Noise IK), relay authorization and replay handling, WebRTC brokering (signaling fan-out, unnegotiated transports, third-party injection), TURN credential minting, and the STUN probe. Compose regression tests additionally render configuration when the Docker Compose CLI is installed (no daemon needed), and execute the missing-secret guard when a POSIX shell is available; those integration checks are skipped when their tools are unavailable.
+The suite covers account/device authorization, credential rotation, revocation and deletion, trusted-proxy/XFF anti-spoofing (IPv4/IPv6), Control-frame validation, end-to-end encrypted Relay (real Noise IK), relay authorization and replay handling, WebRTC brokering (signaling fan-out, unnegotiated transports, third-party injection), TURN credential minting, the STUN probe, the web session channel (browser device registration, relay selection, encrypted `agent.acp.*` round trips) and the ACP chat projection (streaming messages, tools, approvals, history folding). Compose regression tests additionally render configuration when the Docker Compose CLI is installed (no daemon needed), and execute the missing-secret guard when a POSIX shell is available; those integration checks are skipped when their tools are unavailable.
 
 ## Keeping in sync with upstream
 
