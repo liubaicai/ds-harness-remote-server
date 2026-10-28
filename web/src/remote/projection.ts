@@ -355,6 +355,12 @@ export function foldNativeEvents(items: ChatItem[], events: readonly unknown[]):
     }
     if (type === 'user/message' || type === 'assistant/message') {
       const message = isRecord(data.message) ? data.message : data
+      // Native DSH also persists injected context as user/message. Only human
+      // sources belong in chat; keep source-less legacy/ACP history compatible.
+      // This shared fold covers both history replay and live session/follow.
+      const source = isRecord(message.source) ? message.source : undefined
+      const sourceKind = source && stringValue(source.kind)
+      if (type === 'user/message' && sourceKind && sourceKind !== 'user') continue
       const content = blocksToText(message.content)
       const role = type === 'user/message' ? 'user' as const : 'assistant' as const
       if (content.text.length > 0 || content.reasoning.length > 0) {

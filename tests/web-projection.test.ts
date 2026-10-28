@@ -162,6 +162,23 @@ describe('history folding and merge', () => {
 })
 
 describe('native DSH event folding', () => {
+  it('filters injected sources consistently in live and history without altering events', () => {
+    const events = ['user', 'runtime-context', 'skills', 'time-context', 'future-injection', undefined].map((kind, index) => ({
+      type: 'user/message', time: 1000 + index,
+      data: { id: `m${index}`, content: [{ type: 'text', text: 'Current runtime context.' }],
+        ...(kind ? { source: { kind } } : {}) },
+    }))
+    const original = JSON.stringify(events)
+    for (const wrapped of [false, true]) {
+      const input = wrapped ? events.map(event => ({ event: { ...event, data: { message: event.data } } })) : events
+      const history = foldHistoryEvents(input)
+      const live = input.reduce<ChatItem[]>((items, event) => foldNativeEvents(items, [event]), [])
+      expect(history.map(item => item.id)).toEqual(['m0', 'm5'])
+      expect(live).toEqual(history)
+    }
+    expect(JSON.stringify(events)).toBe(original)
+  })
+
   it('streams assistant/chunk deltas and seals the turn on turn/end', () => {
     let items: ChatItem[] = []
     items = foldNativeEvents(items, [
