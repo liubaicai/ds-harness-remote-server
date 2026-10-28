@@ -27,6 +27,7 @@ import { navigate } from './nav'
 import { ThemeToggle } from './ThemeToggle'
 import {
   SessionRuntime,
+  explainError,
   type HostSummary,
   type RuntimeSnapshot,
   type SessionEntry,
@@ -83,6 +84,7 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
   const [draft, setDraft] = useState('')
   const [newOpen, setNewOpen] = useState(false)
   const [newPath, setNewPath] = useState('')
+  const [newKind, setNewKind] = useState<'dsh' | 'acp'>('dsh')
   const [newBackend, setNewBackend] = useState<string>()
   const [creating, setCreating] = useState(false)
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
@@ -109,8 +111,8 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
 
   const host = useMemo(() => hosts?.find(item => item.deviceId === hostId), [hosts, hostId])
   const activeSession = useMemo(
-    () => snapshot.sessions.find(item => item.conversationId === snapshot.activeSessionId),
-    [snapshot.sessions, snapshot.activeSessionId],
+    () => snapshot.dshSessions.concat(snapshot.sessions).find(item => item.conversationId === snapshot.activeSessionId),
+    [snapshot.dshSessions, snapshot.sessions, snapshot.activeSessionId],
   )
 
   const connect = useCallback(async () => {
@@ -120,9 +122,10 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
 
   const openSession = useCallback(async (entry: SessionEntry) => {
     try {
-      await runtime.openSession(entry.conversationId, entry.backend, entry.path)
+      if (entry.kind === 'dsh') await runtime.openDshSession(entry.conversationId, entry.path)
+      else await runtime.openSession(entry.conversationId, entry.backend, entry.path)
     } catch (error) {
-      void message.error(error instanceof Error ? error.message : '打开会话失败。')
+      void message.error(explainError(error))
     }
   }, [runtime, message])
 
@@ -130,7 +133,7 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
     try {
       await runtime.loadSessions(workspace.path, workspace.backend)
     } catch (error) {
-      void message.error(error instanceof Error ? error.message : '加载会话列表失败。')
+      void message.error(explainError(error))
     }
   }, [runtime, message])
 
@@ -139,15 +142,16 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
     if (path.length === 0) return
     setCreating(true)
     try {
-      await runtime.newSession(path, (newBackend ?? snapshot.backends[0]) as AcpAgentBackend | undefined)
+      if (newKind === 'dsh') await runtime.newDshSession(path)
+      else await runtime.newSession(path, (newBackend ?? snapshot.backends[0]) as AcpAgentBackend | undefined)
       setNewOpen(false)
       setNewPath('')
     } catch (error) {
-      void message.error(error instanceof Error ? error.message : '新建会话失败。')
+      void message.error(explainError(error))
     } finally {
       setCreating(false)
     }
-  }, [runtime, newPath, newBackend, snapshot.backends, message])
+  }, [runtime, newPath, newKind, newBackend, snapshot.backends, message])
 
   const send = useCallback(async () => {
     const text = draft
@@ -156,7 +160,7 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
     try {
       await runtime.sendPrompt(text)
     } catch (error) {
-      void message.error(error instanceof Error ? error.message : '发送失败。')
+      void message.error(explainError(error))
     }
   }, [runtime, draft, snapshot.prompting, message])
 
@@ -190,7 +194,8 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
       </div>
 
       <button className="dsh-new-chat" onClick={() => {
-        setNewPath(snapshot.workspaces[0]?.path ?? '')
+        setNewPath(snapshot.workspaces[0]?.path ?? snapshot.dshSessions[0]?.path ?? '')
+        setNewKind(snapshot.dshAvailable ? 'dsh' : 'acp')
         setNewBackend(snapshot.backends[0])
         setNewOpen(true)
       }} disabled={snapshot.connection !== 'connected'}>
@@ -218,17 +223,42 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
       </div>
 
       <div className="dsh-section-head">
-        <span>工作区</span>
+        <span>{snapshot.dshAvailable ? 'DSH 会话' : '工作区'}</span>
         <span className="dsh-section-head-actions">
           <button className="dsh-icon-btn" onClick={() => void runtime.refreshCatalog().catch(() => undefined)} title="刷新目录"><ReloadOutlined /></button>
-          <button className="dsh-icon-btn" onClick={() => { setNewPath(''); setNewBackend(snapshot.backends[0]); setNewOpen(true) }} title="新建会话"><FileAddOutlined /></button>
+          <button className="dsh-icon-btn" onClick={() => {
+            setNewPath(snapshot.workspaces[0]?.path ?? snapshot.dshSessions[0]?.path ?? '')
+            setNewKind(snapshot.dshAvailable ? 'dsh' : 'acp')
+            setNewBackend(snapshot.backends[0])
+            setNewOpen(true)
+          }} title="新建会话"><FileAddOutlined /></button>
         </span>
       </div>
 
       <div className="dsh-side-scroll">
-        {snapshot.workspaces.length === 0
-          ? <div className="dsh-empty"><div className="dsh-empty-sub">{snapshot.connection === 'connected' ? 'Host 未通告工作区' : '连接 Host 后显示工作区与会话'}</div></div>
-          : groupWorkspaces(snapshot.workspaces).map(group => {
+        {/* 原生 DSH 会话 */}
+        {snapshot.dshAvailable && snapshot.dshSessions.length > 0 && (
+          <div className="dsh-ws-group">
+            {snapshot.dshSessions.map(entry => (
+              <button key={entry.conversationId}
+                className={`dsh-session-row ${snapshot.activeSessionId === entry.conversationId ? 'is-active' : ''}`}
+                onClick={() => void openSession(entry)}>
+                <span className="dsh-session-title">{entry.title || '新对话'}</span>
+                <span className="dsh-session-time">{fmtRelative(entry.updatedAt || entry.createdAt)}</span>
+              </button>
+            ))}
+          </div>
+        )}
+        {snapshot.dshAvailable && snapshot.dshSessions.length === 0 && snapshot.workspaces.length === 0 && (
+          <div className="dsh-empty"><div className="dsh-empty-sub">Host 上暂无 DSH 会话，点上方 ＋ 新建。</div></div>
+        )}
+        {/* Agent ACP 工作区 */}
+        {snapshot.workspaces.length > 0 && <div className="dsh-section-head" style={{ paddingTop: 10 }}><span>Agent 工作区</span></div>}
+        {snapshot.workspaces.length === 0 && snapshot.connection === 'connected' && !snapshot.dshAvailable
+          ? <div className="dsh-empty"><div className="dsh-empty-sub">{snapshot.acpNote ?? 'Host 未提供会话能力。'}</div></div>
+          : snapshot.workspaces.length === 0 && snapshot.connection !== 'connected'
+            ? <div className="dsh-empty"><div className="dsh-empty-sub">连接 Host 后显示工作区与会话</div></div>
+            : groupWorkspaces(snapshot.workspaces).map(group => {
             const open = !collapsed[`${group.backend}:${group.path}`]
             return <div className="dsh-ws-group" key={`${group.backend}:${group.path}`}>
               <button className="dsh-ws-head" onClick={() => {
@@ -268,7 +298,8 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
         <span className={`dsh-status-chip ${connectionChip.cls}`}><span className="dot" />{connectionChip.label}</span>
         {snapshot.backends.map(backend => <span key={backend} className="dsh-status-chip">{backendLabel(backend)}</span>)}
         <Tooltip title="新建对话"><button className="dsh-icon-btn" onClick={() => {
-          setNewPath(snapshot.workspaces[0]?.path ?? '')
+          setNewPath(snapshot.workspaces[0]?.path ?? snapshot.dshSessions[0]?.path ?? '')
+          setNewKind(snapshot.dshAvailable ? 'dsh' : 'acp')
           setNewBackend(snapshot.backends[0])
           setNewOpen(true)
         }}><PlusCircleOutlined /></button></Tooltip>
@@ -339,7 +370,9 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
               )}
             </div>
             <span className="dsh-pill-btn" style={{ cursor: 'default' }}>
-              ✦ {backendLabel(snapshot.backends[0] ?? (activeSession?.backend ?? 'cursor'))}
+              {snapshot.activeKind === 'dsh'
+                ? '✦ DSH'
+                : `✦ ${backendLabel(activeSession?.backend ?? snapshot.backends[0] ?? 'agent')}`}
             </span>
             {snapshot.prompting
               ? <button className="dsh-send-btn is-stop" title="停止" onClick={() => void runtime.cancelPrompt()}>■</button>
@@ -352,15 +385,33 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
 
     <Modal title="新建会话" open={newOpen} onCancel={() => setNewOpen(false)} onOk={() => void createSession()} confirmLoading={creating} okText="创建" cancelText="取消">
       <Space direction="vertical" style={{ width: '100%' }}>
+        {snapshot.dshAvailable && snapshot.backends.length > 0 && (
+          <>
+            <span>会话类型</span>
+            <Select
+              style={{ width: '100%' }}
+              value={newKind}
+              onChange={value => setNewKind(value)}
+              options={[
+                { value: 'dsh', label: 'DSH 会话' },
+                { value: 'acp', label: 'Agent 会话' },
+              ]}
+            />
+          </>
+        )}
         <span>工作目录（Host 上已存在的绝对路径）</span>
         <Input value={newPath} onChange={event => setNewPath(event.target.value)} placeholder="/home/user/project" />
-        <span>后端</span>
-        <Select
-          style={{ width: '100%' }}
-          value={newBackend ?? snapshot.backends[0]}
-          onChange={setNewBackend}
-          options={(snapshot.backends.length > 0 ? snapshot.backends : ['cursor']).map(backend => ({ value: backend, label: backendLabel(backend) }))}
-        />
+        {newKind === 'acp' && (
+          <>
+            <span>后端</span>
+            <Select
+              style={{ width: '100%' }}
+              value={newBackend ?? snapshot.backends[0]}
+              onChange={setNewBackend}
+              options={(snapshot.backends.length > 0 ? snapshot.backends : []).map(backend => ({ value: backend, label: backendLabel(backend) }))}
+            />
+          </>
+        )}
       </Space>
     </Modal>
   </div>

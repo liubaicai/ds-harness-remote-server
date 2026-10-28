@@ -284,9 +284,13 @@ function blocksToText(blocks: unknown): { text: string; reasoning: string; toolR
 /**
  * Fold `dsh/sessionHistory` events (native DSH session events produced by the
  * Host's ACP history projection) into chat items. Tolerant of unknown shapes.
+ * Also used incrementally for live `session/follow` entries.
  */
 export function foldHistoryEvents(events: readonly unknown[]): ChatItem[] {
-  const items: ChatItem[] = []
+  return foldNativeEvents([], events)
+}
+
+export function foldNativeEvents(items: ChatItem[], events: readonly unknown[]): ChatItem[] {
   for (const raw of events) {
     if (!isRecord(raw)) continue
     // Accept both `{ type, event: {...} }` envelopes and bare `{ event }` ones.
@@ -294,6 +298,34 @@ export function foldHistoryEvents(events: readonly unknown[]): ChatItem[] {
     const body = isRecord(raw.event) ? raw.event : raw
     const type = stringValue(body.type) ?? outerType
     const data = isRecord(body.data) ? body.data : {}
+    if (type === 'assistant/chunk') {
+      // Streaming delta from session/follow (text-delta / reasoning-delta).
+      const chunk = isRecord(data.chunk) ? data.chunk : {}
+      const chunkType = stringValue(chunk.type)
+      const text = typeof chunk.text === 'string' ? chunk.text : ''
+      if (text.length === 0) continue
+      if (chunkType === 'reasoning-delta') items = appendDelta(items, 'assistant', text, 'reasoning')
+      else items = appendDelta(items, 'assistant', text, 'text')
+      continue
+    }
+    if (type === 'turn/end' || type === 'prompt/finished' || type === 'prompt/failed') {
+      // Native turn boundary: seal live bubbles and stamp the status line.
+      const reason = type === 'prompt/failed' ? 'failed' as const
+        : isRecord(data.reason) && stringValue(data.reason.kind) === 'cancelled' ? 'stopped' as const
+          : 'completed' as const
+      const time = typeof body.time === 'number' && body.time > 0 ? body.time : Date.now()
+      items = finalizeLive(items).map(item => {
+        if (item.kind === 'message' && (item.id === LIVE_ASSISTANT_ID || item.id === LIVE_USER_ID)) {
+          return {
+            ...item,
+            id: `${item.id}:${time}`,
+            ...(item.role === 'assistant' ? { turnEnd: { reason, time } } : {}),
+          }
+        }
+        return item
+      })
+      continue
+    }
     if (type === 'user/message' || type === 'assistant/message') {
       const message = isRecord(data.message) ? data.message : data
       const content = blocksToText(message.content)

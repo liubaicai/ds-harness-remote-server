@@ -3,6 +3,7 @@ import {
   applyAgentFrame,
   applySessionFrame,
   foldHistoryEvents,
+  foldNativeEvents,
   mergeHistoryAndLive,
   resolveApproval,
   type ChatItem,
@@ -157,5 +158,50 @@ describe('history folding and merge', () => {
     const live = applyAgentFrame([], textFrame('s1', 'agent_message_chunk', 'same'))
     const merged = mergeHistoryAndLive(history, live)
     expect(merged).toHaveLength(2)
+  })
+})
+
+describe('native DSH event folding', () => {
+  it('streams assistant/chunk deltas and seals the turn on turn/end', () => {
+    let items: ChatItem[] = []
+    items = foldNativeEvents(items, [
+      { event: { type: 'user/message', seq: 1, time: 1, data: { message: { id: 'u1', role: 'user', content: [{ type: 'text', text: '问题' }] } } } },
+    ])
+    items = foldNativeEvents(items, [
+      { event: { type: 'assistant/chunk', seq: 2, time: 2, data: { chunk: { type: 'text-delta', text: '答' } } } },
+      { event: { type: 'assistant/chunk', seq: 3, time: 3, data: { chunk: { type: 'text-delta', text: '案' } } } },
+      { event: { type: 'assistant/chunk', seq: 4, time: 4, data: { chunk: { type: 'reasoning-delta', text: '思考' } } } },
+    ])
+    expect(items).toHaveLength(2)
+    const live = items[1]!
+    expect(live.kind === 'message' && live.text).toBe('答案')
+    expect(live.kind === 'message' && live.reasoning).toBe('思考')
+    expect(live.kind === 'message' && live.streaming).toBe(true)
+
+    items = foldNativeEvents(items, [{ event: { type: 'turn/end', seq: 5, time: 5, data: { reason: { kind: 'completed' } } } }])
+    const sealed = items[1]!
+    expect(sealed.kind === 'message' && sealed.turnEnd?.reason).toBe('completed')
+    expect(sealed.kind === 'message' && sealed.streaming).toBe(false)
+    // Sealed turn: the next chunk opens a fresh bubble.
+    const next = foldNativeEvents(items, [{ event: { type: 'assistant/chunk', seq: 6, time: 6, data: { chunk: { type: 'text-delta', text: '下一轮' } } } }])
+    expect(next).toHaveLength(3)
+    expect(next[2]!.id).not.toBe(sealed.id)
+  })
+
+  it('folds tool call/result rows from live native events', () => {
+    let items: ChatItem[] = []
+    items = foldNativeEvents(items, [
+      { event: { type: 'tool/call', seq: 1, time: 1, data: { callId: 'c9', name: 'Bash', arguments: '{"command":"ls"}' } } },
+    ])
+    items = foldNativeEvents(items, [
+      { event: { type: 'tool/result', seq: 2, time: 2, data: { message: { content: [{ type: 'tool-result', toolCallId: 'c9', content: [{ type: 'text', text: 'ok' }] }] } } } },
+    ])
+    expect(items).toHaveLength(1)
+    const tool = items[0]!
+    if (tool.kind === 'tool') {
+      expect(tool.toolName).toBe('Bash')
+      expect(tool.state).toBe('finished')
+      expect(tool.resultText).toContain('ok')
+    }
   })
 })
