@@ -144,7 +144,7 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
 
   const openSession = useCallback(async (entry: SessionEntry) => {
     try {
-      if (entry.kind === 'dsh') await runtime.openDshSession(entry.conversationId, entry.path)
+      if (entry.kind === 'dsh') await runtime.openDshSession(entry.conversationId, entry.path, false, entry)
       else await runtime.openSession(entry.conversationId, entry.backend, entry.path)
     } catch (error) {
       void message.error(explainError(error))
@@ -272,7 +272,10 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
               <button key={entry.conversationId}
                 className={`dsh-session-row ${snapshot.activeSessionId === entry.conversationId ? 'is-active' : ''}`}
                 onClick={() => void openSession(entry)}>
-                <span className="dsh-session-title">{entry.title || '新对话'}</span>
+                <span className="dsh-session-title">
+                  {entry.title || '新对话'}
+                  {entry.subagent && <span className="dsh-sub-tag">子代理</span>}
+                </span>
                 <span className="dsh-session-time">{fmtRelative(entry.updatedAt || entry.createdAt)}</span>
               </button>
             ))}

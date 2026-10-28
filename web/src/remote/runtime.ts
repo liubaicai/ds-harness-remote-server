@@ -10,7 +10,7 @@
  */
 import { AgentAcpClient, type AcpAgentBackend, type AgentAcpFrameData, type AcpStream } from './acp-client'
 import { RemoteClientCore, RemoteRpcError } from './client-core'
-import { HarnessClient, deriveSessionTitle, type HarnessRemoteSession } from './harness-client'
+import { HarnessClient, deriveSessionTitle, isSubagentSession, type HarnessRemoteSession } from './harness-client'
 import { ensureIdentity, WEB_CLIENT_VERSION } from './identity'
 import {
   applyAgentFrame,
@@ -50,6 +50,10 @@ export interface SessionEntry {
   backend?: AcpAgentBackend
   path?: string
   running?: boolean
+  /** Raw parent link (also set on forks — not a routing hint by itself). */
+  parentSessionId?: string
+  /** Explicit `origin: 'subagent'` — selects the durable parent address form. */
+  subagent?: boolean
 }
 
 export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'failed'
@@ -81,6 +85,8 @@ const ACP_BACKENDS = ['cursor', 'antigravity', 'pi', 'opencode', 'claude'] as co
 interface HarnessFeatures {
   capabilities: string[]
   remoteGateway: boolean
+  /** Present when the Host advertises `harness.remote.v3` (assistant-stream frames). */
+  sessionFormat?: 3
   acpBackends: AcpAgentBackend[]
 }
 
@@ -124,7 +130,8 @@ async function describeHarness(core: RemoteClientCore): Promise<HarnessFeatures>
     ? record.capabilities.filter((item): item is string => typeof item === 'string')
     : []
   const workspaceTypes = Array.isArray(record.workspaceTypes) ? record.workspaceTypes : undefined
-  const remoteGateway = capabilities.includes('harness.remote.v1') || capabilities.includes('harness.remote.v3')
+  const remoteV3 = capabilities.includes('harness.remote.v3')
+  const remoteGateway = capabilities.includes('harness.remote.v1') || remoteV3
   const acpBackends = ACP_BACKENDS.filter(backend => {
     const capability = `agent.acp.${backend}.v1`
     if (!capabilities.includes(capability)) return false
@@ -132,7 +139,7 @@ async function describeHarness(core: RemoteClientCore): Promise<HarnessFeatures>
     const entries = workspaceTypes.filter(item => isRecord(item) && item.id === backend)
     return entries.length === 1 && entries[0]?.capability === capability && entries[0]?.available === true
   })
-  return { capabilities, remoteGateway, acpBackends }
+  return { capabilities, remoteGateway, ...(remoteV3 ? { sessionFormat: 3 as const } : {}), acpBackends }
 }
 
 export function explainError(error: unknown): string {
@@ -140,6 +147,9 @@ export function explainError(error: unknown): string {
   const code = (error as { code?: string }).code
   if (code === 'METHOD_NOT_ALLOWED' || /disabled or unavailable/i.test(error.message)) {
     return `Host 未启用该 Agent 后端（${error.message}）。如需 Agent 会话请在 Host 插件配置 acp.enabled / acp.backends；DSH 会话不受影响。`
+  }
+  if (/durable parent address|subagent sessions/i.test(error.message)) {
+    return '该会话是子代理会话，需要通过父会话地址打开。已自动重试父地址；若仍失败请从父会话进入。'
   }
   if (code === 'SESSION_NOT_FOUND') return '会话不存在或已被清理。'
   if (code === 'HOST_OFFLINE') return 'Host 离线，请检查 Host 插件后重连。'
@@ -222,7 +232,7 @@ export class SessionRuntime {
 
       // Capability discovery drives everything below — never assume a backend.
       const features = await describeHarness(core)
-      if (features.remoteGateway) this.harness = new HarnessClient(core)
+      if (features.remoteGateway) this.harness = new HarnessClient(core, features.sessionFormat)
 
       let acpNote: string | undefined
       if (features.acpBackends.length > 0) {
@@ -329,6 +339,10 @@ export class SessionRuntime {
       kind: 'dsh',
       ...(item.cwd === undefined ? {} : { path: item.cwd }),
       running: item.running,
+      ...(item.parentSessionId === undefined ? {} : { parentSessionId: item.parentSessionId }),
+      // Only an explicit subagent origin selects the durable parent address;
+      // forks carry parentSessionId too but stay on the plain session form.
+      ...(isSubagentSession(item) ? { subagent: true } : {}),
     }
   }
 
@@ -370,7 +384,7 @@ export class SessionRuntime {
   }
 
   /** Open a native DSH session: snapshot history + live follow. */
-  async openDshSession(sessionId: string, cwd?: string, fresh = false): Promise<void> {
+  async openDshSession(sessionId: string, cwd?: string, fresh = false, entry?: Pick<SessionEntry, 'parentSessionId' | 'subagent'>): Promise<void> {
     const harness = this.requireHarness()
     this.sessionAbort?.abort()
     const abort = new AbortController()
@@ -390,11 +404,25 @@ export class SessionRuntime {
     })
     this.activePath = cwd
     this.activeBackend = undefined
+    // Subagent sessions need their durable parent address; forks (parent link
+    // without the subagent origin) stay on the plain session form unless the
+    // Host insists — then retry once through the parent address.
+    const parent = entry?.subagent ? entry.parentSessionId : undefined
     const snapshot = await harness.follow(sessionId, entries => {
       if (abort.signal.aborted) return
       this.liveItems = foldNativeEvents(this.liveItems, entries as unknown[])
       this.publishItems()
-    }, abort.signal)
+    }, abort.signal, parent).catch(async error => {
+      const wantsParent = parent === undefined
+        && entry?.parentSessionId !== undefined
+        && /durable parent|subagent/i.test(error instanceof Error ? error.message : '')
+      if (!wantsParent || abort.signal.aborted) throw error
+      return harness.follow(sessionId, entries => {
+        if (abort.signal.aborted) return
+        this.liveItems = foldNativeEvents(this.liveItems, entries as unknown[])
+        this.publishItems()
+      }, abort.signal, entry.parentSessionId)
+    })
     if (abort.signal.aborted) return
     if (!fresh) this.historyItems = foldHistoryEvents(snapshot.entries as unknown[])
     this.publishItems()

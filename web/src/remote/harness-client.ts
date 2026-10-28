@@ -15,7 +15,32 @@ export interface HarnessRemoteSession {
   title?: string
   cwd?: string
   parentSessionId?: string
+  /** Only an explicit `origin: 'subagent'` selects subagent routing (forks also carry a parent). */
+  origin?: 'subagent'
   projections?: { values?: Record<string, unknown> }
+}
+
+/**
+ * Subagent routing predicate (mirrors upstream `isSubagentSession`): forks also
+ * carry `parentSessionId`, but only the explicit origin selects the durable
+ * parent address form.
+ */
+export function isSubagentSession(
+  session: Pick<HarnessRemoteSession, 'origin' | 'parentSessionId'>,
+): session is { origin: 'subagent'; parentSessionId: string } {
+  return session.origin === 'subagent' && session.parentSessionId !== undefined
+}
+
+/**
+ * Official SessionAddress: a subagent session must be addressed through its
+ * durable parent (`{ kind: 'subagent', parentSessionId, childSessionId }`);
+ * the plain session form is rejected by the Host with a "durable parent
+ * address" error.
+ */
+export function sessionAddress(sessionId: string, parentSessionId?: string) {
+  return parentSessionId === undefined
+    ? { kind: 'session' as const, sessionId }
+    : { kind: 'subagent' as const, parentSessionId, childSessionId: sessionId, mode: 'unknown' as const }
 }
 
 export interface HarnessSessionEvent {
@@ -35,12 +60,29 @@ export interface HarnessFollowSnapshot {
   cursor?: number
 }
 
+interface AssistantStreamState {
+  attemptId: string
+  startedAfterSeq: number
+  turn: number
+  step: number
+  nextIndex: number
+}
+
+interface FollowHandle {
+  controller: AbortController
+  stream?: AsyncIterable<unknown>
+  /** sessionFormat 3 assistant-stream attempt being decoded (ordered chunks). */
+  assistant?: AssistantStreamState
+}
+
 export class HarnessClient {
   private readonly gateway: RemoteTypertGateway
-  private followHandle?: { controller: AbortController; stream?: AsyncIterable<unknown> }
+  private readonly sessionFormat: 3 | undefined
+  private followHandle?: FollowHandle
 
-  constructor(core: RemoteClientCore) {
+  constructor(core: RemoteClientCore, sessionFormat?: 3) {
     this.gateway = new RemoteTypertGateway(core)
+    this.sessionFormat = sessionFormat
   }
 
   private async callValue<T>(endpoint: string, args: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
@@ -76,7 +118,8 @@ export class HarnessClient {
   }
 
   async cancel(sessionId: string, signal?: AbortSignal): Promise<void> {
-    await this.callValue('session/cancel', { request: { sessionId } }, signal)
+    const result = await this.callValue<{ accepted?: boolean }>('session/cancel', { request: { sessionId } }, signal)
+    if (result?.accepted !== true) throw new RemoteGatewayError('INVALID_MESSAGE', 'Host 未接受停止请求。')
   }
 
   /**
@@ -85,22 +128,28 @@ export class HarnessClient {
    * snapshot variations (control preludes, result envelopes, chunked frames,
    * history replayed as live entries) — a missing snapshot degrades to an
    * empty history instead of blocking the conversation.
+   *
+   * Subagent sessions must be opened with their durable parent
+   * (`parentSessionId`) or the Host rejects the plain session form.
    */
   async follow(
     sessionId: string,
     onEntry: (entries: HarnessHistoryEntry[]) => void,
     signal?: AbortSignal,
+    parentSessionId?: string,
   ): Promise<HarnessFollowSnapshot> {
     await this.closeFollow(false)
     const controller = new AbortController()
     const abortForward = () => controller.abort()
     signal?.addEventListener('abort', abortForward, { once: true })
-    this.followHandle = { controller }
+    const handle: FollowHandle = { controller }
+    this.followHandle = handle
     const request = {
       args: {
         request: {
-          address: { kind: 'session', sessionId },
+          address: sessionAddress(sessionId, parentSessionId),
           maxMessages: 200,
+          ...(this.sessionFormat === 3 ? { assistantStream: true as const } : {}),
         },
       },
     }
@@ -126,6 +175,7 @@ export class HarnessClient {
       if (!isRecord(value)) continue
       const records = Array.isArray(value.records) ? value.records : undefined
       if (records !== undefined || value.type === 'snapshot') {
+        if (this.sessionFormat === 3) handle.assistant = assistantStreamBaseline(value.assistantStream)
         snapshot = {
           entries: historyEntriesFromRecords(records ?? []),
           hasMore: value.hasMore === true,
@@ -133,7 +183,7 @@ export class HarnessClient {
         }
         break
       }
-      const entries = entriesFromFollowValue(value)
+      const entries = this.entriesFromSessionFollow(handle, value)
       if (entries.length > 0) leading.push(...entries)
       // Unknown control values (ready/baseline/…) are skipped silently.
     }
@@ -147,13 +197,49 @@ export class HarnessClient {
         while (this.followHandle?.controller === controller) {
           const next = await iterator.next()
           if (next.done || this.followHandle?.controller !== controller) return
-          pump(entriesFromFollowValue(unwrapEnvelope(next.value)))
+          pump(this.entriesFromSessionFollow(handle, unwrapEnvelope(next.value)))
         }
       } catch {
         // Stream failures end live updates; history on screen stays valid.
       }
     })()
     return snapshot
+  }
+
+  /**
+   * Route one follow value: sessionFormat 3 assistant-stream frames are decoded
+   * in order (attemptId + index) into `assistant/chunk` deltas; everything else
+   * uses the classic event/chunks record shapes.
+   */
+  private entriesFromSessionFollow(handle: FollowHandle, value: unknown): HarnessHistoryEntry[] {
+    if (this.sessionFormat !== 3 || !isRecord(value) || value.type !== 'assistant-stream') {
+      return entriesFromFollowValue(value)
+    }
+    const frame = isRecord(value.frame) ? value.frame : undefined
+    if (frame === undefined || typeof frame.type !== 'string') return []
+    if (frame.type === 'start') {
+      handle.assistant = assistantStreamAttempt(frame, 0)
+      return []
+    }
+    const attempt = handle.assistant
+    if (frame.type === 'end') {
+      if (attempt !== undefined && frame.attemptId === attempt.attemptId) handle.assistant = undefined
+      return []
+    }
+    if (frame.type !== 'chunk' || attempt === undefined
+      || frame.attemptId !== attempt.attemptId
+      || frame.index !== attempt.nextIndex
+      || typeof frame.time !== 'number'
+      || !isRecord(frame.chunk)) return []
+    attempt.nextIndex += 1
+    return [{
+      event: {
+        type: 'assistant/chunk',
+        seq: attempt.startedAfterSeq + 1 - 1 / (attempt.nextIndex + 1),
+        time: frame.time,
+        data: { turn: attempt.turn, step: attempt.step, chunk: frame.chunk },
+      },
+    }]
   }
 
   async closeFollow(notifyRemote = true): Promise<void> {
@@ -185,8 +271,24 @@ function normalizeSession(value: unknown): HarnessRemoteSession | undefined {
     ...(typeof value.title === 'string' ? { title: value.title } : {}),
     ...(typeof value.cwd === 'string' ? { cwd: value.cwd } : {}),
     ...(typeof value.parentSessionId === 'string' ? { parentSessionId: value.parentSessionId } : {}),
+    ...(value.origin === 'subagent' ? { origin: 'subagent' as const } : {}),
     ...(isRecord(value.projections) ? { projections: { values: isRecord(value.projections.values) ? value.projections.values : undefined } } : {}),
   }
+}
+
+function assistantStreamBaseline(value: unknown): AssistantStreamState | undefined {
+  return isRecord(value) && isRecord(value.activeAttempt) ? assistantStreamAttempt(value.activeAttempt) : undefined
+}
+
+function assistantStreamAttempt(value: Record<string, unknown>, defaultNextIndex?: number): AssistantStreamState | undefined {
+  const nextIndex = typeof value.nextIndex === 'number' ? value.nextIndex : defaultNextIndex
+  return typeof value.attemptId === 'string'
+    && typeof value.startedAfterSeq === 'number'
+    && typeof value.turn === 'number'
+    && typeof value.step === 'number'
+    && nextIndex !== undefined
+    ? { attemptId: value.attemptId, startedAfterSeq: value.startedAfterSeq, turn: value.turn, step: value.step, nextIndex }
+    : undefined
 }
 
 /**
@@ -254,6 +356,7 @@ function entriesFromChunkRun(event: Record<string, unknown>): HarnessHistoryEntr
   if (typeof event.type !== 'string' || typeof event.seq !== 'number' || typeof event.time !== 'number' || !isRecord(event.data)) return []
   const seq: number = event.seq
   const data = event.data
+  const chunkIndex = typeof data.index === 'number' ? data.index : undefined
   const base = {
     ...(typeof data.turn === 'number' ? { turn: data.turn } : {}),
     ...(typeof data.step === 'number' ? { step: data.step } : {}),
@@ -273,6 +376,7 @@ function entriesFromChunkRun(event: Record<string, unknown>): HarnessHistoryEntr
             ...base,
             chunk: {
               type: event.type === 'chunkrow/text-chunks' ? 'text-delta' : 'reasoning-delta',
+              ...(chunkIndex === undefined ? {} : { index: chunkIndex }),
               text,
             },
           },
@@ -280,7 +384,29 @@ function entriesFromChunkRun(event: Record<string, unknown>): HarnessHistoryEntr
       }
     })
   }
-  return []
+  if (event.type !== 'chunkrow/tool-call-chunks') return []
+  const args = Array.isArray(data.args) ? data.args.filter((item): item is string => typeof item === 'string') : []
+  let toolTime = event.time
+  return args.map((text, offset) => {
+    if (offset > 0) toolTime += dt[offset - 1] ?? 0
+    return {
+      event: {
+        type: 'assistant/chunk',
+        seq: seq + offset,
+        time: toolTime,
+        data: {
+          ...base,
+          chunk: {
+            type: 'tool-call-delta',
+            ...(chunkIndex === undefined ? {} : { index: chunkIndex }),
+            ...(typeof data.id === 'string' ? { id: data.id } : {}),
+            ...(typeof data.name === 'string' ? { name: data.name } : {}),
+            argumentsDelta: text,
+          },
+        },
+      },
+    }
+  })
 }
 
 function clientTimeZone(): string | undefined {

@@ -110,6 +110,28 @@ function finalizeLive(items: ChatItem[]): ChatItem[] {
       : item)
 }
 
+/** Accumulate one `tool-call-delta` chunk onto a running tool card. */
+function appendToolDelta(items: ChatItem[], chunk: Record<string, unknown>): ChatItem[] {
+  const delta = typeof chunk.argumentsDelta === 'string' ? chunk.argumentsDelta : ''
+  const id = `history-tool:${stringValue(chunk.id) ?? stringValue(chunk.index) ?? 'streaming'}`
+  const index = items.findIndex(item => item.kind === 'tool' && item.id === id)
+  const copy = items.slice()
+  const update = (previous?: ToolActivity): ToolActivity => ({
+    kind: 'tool',
+    id,
+    toolName: stringValue(chunk.name) ?? previous?.toolName ?? '工具',
+    state: 'running',
+    createdAt: previous?.createdAt ?? Date.now(),
+    ...(delta.length > 0 || previous?.argumentsText !== undefined
+      ? { argumentsText: boundedDetail(`${previous?.argumentsText ?? ''}${delta}`) }
+      : {}),
+    ...(previous?.resultText === undefined ? {} : { resultText: previous.resultText }),
+  })
+  if (index >= 0) copy[index] = update(items[index] as ToolActivity)
+  else copy.push(update())
+  return copy
+}
+
 /**
  * Apply one `agent.acp.frame` (session/update | session/request_permission).
  * Unknown update kinds are ignored so backend extensions never break the view.
@@ -299,9 +321,14 @@ export function foldNativeEvents(items: ChatItem[], events: readonly unknown[]):
     const type = stringValue(body.type) ?? outerType
     const data = isRecord(body.data) ? body.data : {}
     if (type === 'assistant/chunk') {
-      // Streaming delta from session/follow (text-delta / reasoning-delta).
+      // Streaming delta from session/follow (text-delta / reasoning-delta /
+      // tool-call-delta). Tool-call deltas accumulate arguments on a live card.
       const chunk = isRecord(data.chunk) ? data.chunk : {}
       const chunkType = stringValue(chunk.type)
+      if (chunkType === 'tool-call-delta') {
+        items = appendToolDelta(items, chunk)
+        continue
+      }
       const text = typeof chunk.text === 'string' ? chunk.text : ''
       if (text.length === 0) continue
       if (chunkType === 'reasoning-delta') items = appendDelta(items, 'assistant', text, 'reasoning')
