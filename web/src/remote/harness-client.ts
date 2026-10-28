@@ -81,10 +81,19 @@ interface OpenedFollow {
   leading: HarnessHistoryEntry[]
 }
 
+/** One `session/follow` request variant; hosts differ in what they accept. */
+interface FollowShape {
+  maxMessages?: number
+  assistantStream: boolean
+  transferFrames: boolean
+}
+
 export class HarnessClient {
   private readonly gateway: RemoteTypertGateway
   private readonly sessionFormat: 3 | undefined
   private followHandle?: FollowHandle
+  /** Request shape this Host accepted (`undefined` until one is proven). */
+  private followShape?: FollowShape
   /** Latest snapshot cursor per session (`throughSeq` for older-history pages). */
   private readonly followCursors = new Map<string, number>()
 
@@ -153,61 +162,83 @@ export class HarnessClient {
     maxMessages = 16,
   ): Promise<HarnessFollowSnapshot> {
     await this.closeFollow(false)
-    // A snapshot that still exceeds the single-frame limit is retried with a
-    // smaller window (the Host only chunks frames when `transferFrames` is
-    // supported); older history keeps loading through pageHistory. Each attempt
-    // needs its own controller — a failed attempt aborts the previous one.
-    let opened: OpenedFollow | undefined
-    let handle: FollowHandle | undefined
-    let controller: AbortController | undefined
+    // Host versions disagree about `session/follow`'s schema: an unknown field
+    // or an out-of-range window is rejected wholesale ("The RPC parameters are
+    // invalid"). Walk the request shapes from most to least specific and
+    // remember the one the Host accepted, so the next open goes straight in.
     let lastError: unknown
-    for (const size of [maxMessages, 4, 1]) {
-      if (size > maxMessages) continue
+    const shapes = this.followShapes(maxMessages)
+    for (const shape of shapes) {
       const attempt = new AbortController()
-      const abortForward = () => attempt.abort()
+      // Only the caller's abort counts as a cancellation: closing this attempt's
+      // own controller is part of the retry, not a cancel.
+      let cancelled = false
+      const abortForward = () => {
+        cancelled = true
+        attempt.abort()
+      }
       signal?.addEventListener('abort', abortForward, { once: true })
-      const attemptHandle: FollowHandle = { controller: attempt }
-      this.followHandle = attemptHandle
+      const handle: FollowHandle = { controller: attempt }
+      this.followHandle = handle
+      let opened: OpenedFollow
       try {
-        opened = await this.openFollow(sessionId, parentSessionId, size, attemptHandle, attempt.signal)
-        handle = attemptHandle
-        controller = attempt
-        break
+        opened = await this.openFollow(sessionId, parentSessionId, shape, handle, attempt.signal)
       } catch (error) {
         lastError = error
         signal?.removeEventListener('abort', abortForward)
-        if (attempt.signal.aborted || !isOversizedFrameError(error)) throw error
+        if (cancelled || signal?.aborted === true) throw error
         await this.closeFollow(false).catch(() => undefined)
+        // Only a rejected request shape is worth another envelope; a real
+        // stream failure (oversized frame, transport loss) must surface.
+        if (!isShapeRejection(error)) throw error
+        continue
       }
-    }
-    if (opened === undefined || handle === undefined || controller === undefined) {
-      throw lastError ?? new RemoteGatewayError('STREAM_FAILED', '会话快照加载失败。')
-    }
-    const { iterator, snapshot, leading } = opened
+      signal?.removeEventListener('abort', abortForward)
+      this.followShape = shape
+      const { iterator, snapshot, leading } = opened
 
-    const pump = (entries: HarnessHistoryEntry[]) => {
-      if (entries.length > 0 && !controller.signal.aborted) onEntry(entries)
-    }
-    pump(leading)
-    void (async () => {
-      try {
-        while (this.followHandle?.controller === controller) {
-          const next = await iterator.next()
-          if (next.done || this.followHandle?.controller !== controller) return
-          pump(this.entriesFromSessionFollow(handle, unwrapEnvelope(next.value)))
-        }
-      } catch {
-        // Stream failures end live updates; history on screen stays valid.
+      const pump = (entries: HarnessHistoryEntry[]) => {
+        if (entries.length > 0 && !attempt.signal.aborted) onEntry(entries)
       }
-    })()
-    return snapshot
+      pump(leading)
+      void (async () => {
+        try {
+          while (this.followHandle?.controller === attempt) {
+            const next = await iterator.next()
+            if (next.done || this.followHandle?.controller !== attempt) return
+            pump(this.entriesFromSessionFollow(handle, unwrapEnvelope(next.value)))
+          }
+        } catch {
+          // Stream failures end live updates; history on screen stays valid.
+        }
+      })()
+      return snapshot
+    }
+    throw lastError ?? new RemoteGatewayError('STREAM_FAILED', '会话快照加载失败。')
   }
 
-  /** Open one follow stream and read its snapshot with a bounded window. */
+  /**
+   * Request shapes in decreasing strictness for `session/follow`. Hosts that
+   * predate `assistantStream` or clamp `maxMessages` reject the whole payload
+   * instead of ignoring the extra field, so each shape is tried once and the
+   * accepted one is reused.
+   */
+  private followShapes(maxMessages: number): FollowShape[] {
+    if (this.followShape !== undefined) return [this.followShape]
+    const assistantStream = this.sessionFormat === 3
+    return [
+      { maxMessages, assistantStream, transferFrames: true },
+      { maxMessages, assistantStream: false, transferFrames: true },
+      { assistantStream: false, transferFrames: true },
+      { assistantStream: false, transferFrames: false },
+    ]
+  }
+
+  /** Open one follow stream and read its snapshot with the given shape. */
   private async openFollow(
     sessionId: string,
     parentSessionId: string | undefined,
-    maxMessages: number,
+    shape: FollowShape,
     handle: FollowHandle,
     signal: AbortSignal,
   ): Promise<OpenedFollow> {
@@ -215,21 +246,14 @@ export class HarnessClient {
       args: {
         request: {
           address: sessionAddress(sessionId, parentSessionId),
-          maxMessages,
-          ...(this.sessionFormat === 3 ? { assistantStream: true as const } : {}),
+          ...(shape.maxMessages === undefined ? {} : { maxMessages: shape.maxMessages }),
+          ...(shape.assistantStream ? { assistantStream: true as const } : {}),
         },
       },
     }
-    let source
-    try {
-      source = await this.gateway.open('session/follow', request, signal, { transferFrames: true })
-    } catch (error) {
-      // Only a schema rejection (Host predates `transferFrames`) may retry
-      // without the flag — any other failure must surface unchanged.
-      if (signal.aborted || !isUnknownFieldError(error)) throw error
-      source = await this.gateway.open('session/follow', request, signal)
-    }
-    this.followHandle && (this.followHandle.stream = source)
+    const source = await this.gateway.open('session/follow', request, signal,
+      shape.transferFrames ? { transferFrames: true } : undefined)
+    handle.stream = source
     const iterator = source[Symbol.asyncIterator]()
 
     // Find the snapshot, skipping control preludes; history may also arrive as
@@ -514,10 +538,18 @@ function isUnknownFieldError(error: unknown): boolean {
   return /unrecognized key|unknown field|unexpected (?:key|property)|invalid (?:input|arguments)/i.test(message)
 }
 
-/** The Host refuses single frames above its secure-message limit. */
-function isOversizedFrameError(error: unknown): boolean {
+/**
+ * The Host rejects a request it cannot parse as a whole: a field it does not
+ * know, or a value outside its schema. It collapses every Zod failure into
+ * INVALID_MESSAGE with the generic text "The RPC parameters are invalid.", so
+ * the code matters more than the message here.
+ */
+function isShapeRejection(error: unknown): boolean {
+  const code = (error as { code?: string } | undefined)?.code
+  if (code === 'INVALID_MESSAGE' || code === 'INVALID_PARAMS' || code === 'INVALID_ARGUMENT') return true
   const message = error instanceof Error ? error.message : String(error)
-  return /oversized harness remote frame|frame exceeds|too large/i.test(message)
+  return isUnknownFieldError(error)
+    || /parameters are invalid|payload is invalid|invalid_type|invalid_enum_value/i.test(message)
 }
 
 /** Some Host versions wrap stream values in `{ok,value}` result envelopes. */

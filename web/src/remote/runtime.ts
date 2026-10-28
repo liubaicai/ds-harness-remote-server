@@ -85,6 +85,22 @@ const ACP_BACKENDS = ['cursor', 'antigravity', 'pi', 'opencode', 'claude'] as co
 /** Bound on older-history pages fetched after the (deliberately small) follow snapshot. */
 const MAX_HISTORY_BACKFILL_PAGES = 6
 
+/**
+ * Consecutive silent reconnect attempts before giving up. A Host that stays
+ * down (or rejects the handshake) must not be retried forever: after this many
+ * failures the UI stops reconnecting and waits for the user.
+ */
+const MAX_RECONNECT_ATTEMPTS = 5
+
+/** A connection that survives this long counts as healthy again. */
+const RECONNECT_STABLE_MS = 20_000
+
+/** Longest wait between two background reconnect attempts. */
+const RECONNECT_MAX_DELAY_MS = 15_000
+
+/** Deadline for one carrier + Noise handshake attempt. */
+const CONNECT_TIMEOUT_MS = 12_000
+
 /** Oldest native event seq in a page — the `beforeSeq` cursor for the next page. */
 function oldestSeq(entries: ReadonlyArray<{ event?: { seq?: unknown } }>): number | undefined {
   let oldest: number | undefined
@@ -175,7 +191,10 @@ export function explainError(error: unknown): string {
     return '该会话是子代理会话，需要通过父会话地址打开。已自动重试父地址；若仍失败请从父会话进入。'
   }
   if (/oversized harness remote frame/i.test(error.message)) {
-    return '会话历史超过 Host 的单帧上限。已自动缩小快照窗口重试；若仍失败，请让 Host 插件升级以支持分片传输。'
+    return '会话历史超过 Host 的单帧上限，且 Host 未开启分片传输。请升级 Host 插件（需要 harness.remote.stream.transfer.v1）后重试。'
+  }
+  if (code === 'INVALID_MESSAGE' || /parameters are invalid/i.test(error.message)) {
+    return 'Host 拒绝了会话请求参数（Host 版本与页面不兼容）。已自动改用兼容的请求格式；若仍失败请刷新页面后重试。'
   }
   if (code === 'SESSION_NOT_FOUND') return '会话不存在或已被清理。'
   if (code === 'HOST_OFFLINE') return 'Host 离线，请检查 Host 插件后重连。'
@@ -213,6 +232,12 @@ export class SessionRuntime {
   private tearingDown = false
   private reconnectTimer?: ReturnType<typeof setTimeout>
   private reconnectAttempts = 0
+  /** Pending "this connection proved stable" timer. */
+  private stableTimer?: ReturnType<typeof setTimeout>
+  /** Monotonic attempt counter; stale callbacks from older attempts are ignored. */
+  private epoch = 0
+  /** Epoch of the connection that actually reached `connected`. */
+  private liveEpoch = 0
 
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener)
@@ -233,11 +258,12 @@ export class SessionRuntime {
     await this.disconnect()
     this.manualDisconnect = false
     this.host = host
-    await this.openConnection(host, false)
+    this.reconnectAttempts = 0
+    await this.openConnection(host, false, ++this.epoch)
   }
 
   /** Establish the encrypted carrier and discover Host capabilities. */
-  private async openConnection(host: HostSummary, silent: boolean): Promise<void> {
+  private async openConnection(host: HostSummary, silent: boolean, epoch: number): Promise<void> {
     this.patch({ connection: 'connecting', connectionError: undefined, acpNote: undefined })
     try {
       const identity = await ensureIdentity()
@@ -249,7 +275,7 @@ export class SessionRuntime {
         clientIdentityKey: identity.publicKey,
         clientVersion: WEB_CLIENT_VERSION,
         onClose: event => {
-          this.handleConnectionLost(event.reason ?? '连接已断开。')
+          this.handleConnectionLost(event.reason ?? '连接已断开。', epoch)
         },
       })
       const transport = new SecureTransport(link, {
@@ -258,9 +284,13 @@ export class SessionRuntime {
       })
       const core = new RemoteClientCore(transport, 35_000)
       core.onClose(error => {
-        if (this.core === core) this.handleConnectionLost(error?.message ?? '连接已断开。')
+        if (this.core === core) this.handleConnectionLost(error?.message ?? '连接已断开。', epoch)
       })
-      await core.connect()
+      // The Noise handshake waits for the Host to answer. When the Host is
+      // offline nothing ever answers, so every attempt needs its own deadline —
+      // otherwise the workbench sits in "connecting" forever instead of
+      // finishing the retry budget.
+      await withTimeout(core.connect(), CONNECT_TIMEOUT_MS)
       this.core = core
 
       // Compact history keeps session snapshots under the single-frame limit
@@ -296,11 +326,13 @@ export class SessionRuntime {
         backends: this.acp ? features.acpBackends : [],
         acpNote,
       })
+      this.liveEpoch = epoch
+      this.scheduleStableReset(epoch)
       await this.refreshCatalog()
     } catch (error) {
       if (silent) {
-        // A background reconnect attempt failed: keep retrying quietly instead
-        // of flashing a failure banner at the user.
+        // A background reconnect attempt failed: keep retrying quietly until
+        // the attempt budget runs out.
         await this.teardown()
         this.scheduleReconnect()
         throw error
@@ -312,21 +344,35 @@ export class SessionRuntime {
   }
 
   /** A transport that dropped on its own: reconnect silently, keep the UI. */
-  private handleConnectionLost(reason: string): void {
+  private handleConnectionLost(reason: string, epoch?: number): void {
     if (this.tearingDown) return
+    // Only the connection that actually went live may schedule a recovery; a
+    // failed attempt reports through its own catch block.
+    if (epoch !== undefined && epoch !== this.liveEpoch) return
+    this.liveEpoch = 0
     if (this.manualDisconnect) {
       this.patch({ connection: 'disconnected', connectionError: reason })
       return
     }
+    if (this.snapshot.connection === 'failed') return
     this.patch({ connection: 'connecting', connectionError: undefined, prompting: false })
     this.scheduleReconnect()
   }
 
   private scheduleReconnect(): void {
     if (this.manualDisconnect || this.host === undefined || this.reconnectTimer !== undefined) return
+    if (this.reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+      // Budget exhausted: stop the loop and hand control back to the user.
+      this.patch({
+        connection: 'failed',
+        connectionError: `与 Host 的连接已断开，自动重连 ${MAX_RECONNECT_ATTEMPTS} 次均失败。请确认 Host 在线后点击「重连」。`,
+        prompting: false,
+      })
+      return
+    }
     const attempt = this.reconnectAttempts
-    // 1s, 2s, 4s, 8s, capped at 10s.
-    const delay = Math.min(1000 * 2 ** attempt, 10_000)
+    // 1s, 2s, 4s, 8s, capped at 15s.
+    const delay = Math.min(1000 * 2 ** attempt, RECONNECT_MAX_DELAY_MS)
     this.reconnectAttempts = attempt + 1
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = undefined
@@ -334,10 +380,23 @@ export class SessionRuntime {
     }, delay)
   }
 
+  /** Reset the attempt budget only once a connection has proven stable. */
+  private scheduleStableReset(epoch: number): void {
+    if (this.stableTimer !== undefined) clearTimeout(this.stableTimer)
+    this.stableTimer = setTimeout(() => {
+      this.stableTimer = undefined
+      if (epoch === this.epoch && this.snapshot.connection === 'connected') this.reconnectAttempts = 0
+    }, RECONNECT_STABLE_MS)
+  }
+
   private clearReconnect(): void {
     if (this.reconnectTimer !== undefined) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = undefined
+    }
+    if (this.stableTimer !== undefined) {
+      clearTimeout(this.stableTimer)
+      this.stableTimer = undefined
     }
     this.reconnectAttempts = 0
   }
@@ -346,13 +405,15 @@ export class SessionRuntime {
   private reconnect(): void {
     const host = this.host
     if (this.manualDisconnect || host === undefined) return
+    const epoch = ++this.epoch
     const sessionId = this.snapshot.activeSessionId
     const kind = this.snapshot.activeKind
     void (async () => {
       try {
         await this.teardown()
-        await this.openConnection(host, true)
-        this.reconnectAttempts = 0
+        if (epoch !== this.epoch) return
+        await this.openConnection(host, true, epoch)
+        if (epoch !== this.epoch) return
         // Reopen whatever was on screen before the drop.
         if (sessionId !== undefined) {
           const entry = this.snapshot.dshSessions.find(item => item.conversationId === sessionId)
@@ -360,7 +421,7 @@ export class SessionRuntime {
           else if (kind === 'acp') await this.openSession(sessionId, this.activeBackend, this.activePath).catch(() => undefined)
         }
       } catch {
-        // openConnection already scheduled the next attempt.
+        // openConnection scheduled the next attempt, or gave up.
       }
     })()
   }
@@ -368,6 +429,9 @@ export class SessionRuntime {
   async disconnect(): Promise<void> {
     this.manualDisconnect = true
     this.clearReconnect()
+    // Invalidate in-flight attempts and any late close callback.
+    this.epoch += 1
+    this.liveEpoch = 0
     await this.teardown()
     this.patch({
       connection: 'idle',
@@ -699,6 +763,17 @@ export class SessionRuntime {
 function backendFromSessionId(sessionId: string): AcpAgentBackend {
   const prefix = sessionId.split(':')[0]
   return prefix !== undefined && prefix.length > 0 && prefix !== sessionId ? prefix : 'cursor'
+}
+
+/** Reject when `work` has not settled within `ms`. */
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error('连接 Host 超时。')), ms)
+  })
+  return Promise.race([work, deadline]).finally(() => {
+    if (timer !== undefined) clearTimeout(timer)
+  })
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

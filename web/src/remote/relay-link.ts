@@ -208,6 +208,9 @@ export class RelayLink {
     const ws = this.ws
     this.ws = undefined
     this.connection = undefined
+    // Never leave a `connect.request` waiting on a dead socket.
+    this.pendingConnectError?.({ code: 'LINK_CLOSED', message: 'The relay link closed.' })
+    this.pendingConnectError = undefined
     try { ws?.close(1000, 'client close') } catch { /* already closed */ }
     this.notifyClose()
   }
@@ -250,6 +253,11 @@ export class RelayLink {
       case 'error': {
         const payload = frame.payload as ControlErrorPayload
         if (payload.connectionId === undefined || payload.connectionId === this.connection?.connectionId) {
+          // An error answer to `connect.request` (e.g. HOST_OFFLINE) must fail
+          // the pending handshake right away; otherwise the caller waits for a
+          // timeout even though the server already said no.
+          this.pendingConnectError?.(payload)
+          this.pendingConnectError = undefined
           this.options.onClose?.({ code: undefined, reason: `${payload.code}: ${payload.message}` })
           void this.close()
         }
