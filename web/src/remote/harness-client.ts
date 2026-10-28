@@ -15,6 +15,7 @@ export interface HarnessRemoteSession {
   title?: string
   cwd?: string
   parentSessionId?: string
+  projections?: { values?: Record<string, unknown> }
 }
 
 export interface HarnessSessionEvent {
@@ -157,7 +158,40 @@ function normalizeSession(value: unknown): HarnessRemoteSession | undefined {
     ...(typeof value.title === 'string' ? { title: value.title } : {}),
     ...(typeof value.cwd === 'string' ? { cwd: value.cwd } : {}),
     ...(typeof value.parentSessionId === 'string' ? { parentSessionId: value.parentSessionId } : {}),
+    ...(isRecord(value.projections) ? { projections: { values: isRecord(value.projections.values) ? value.projections.values : undefined } } : {}),
   }
+}
+
+/**
+ * Display title for a native session. The Host projects titles through
+ * `projections.values` (sessionListMetadata.title and friends) — never fall
+ * back to the raw session ID in the UI.
+ */
+export function deriveSessionTitle(session: HarnessRemoteSession): string {
+  const values = session.projections?.values
+  if (isRecord(values)) {
+    const metadata = isRecord(values.sessionListMetadata) ? values.sessionListMetadata : undefined
+    const fromMetadata = trimText(metadata?.title)
+    if (fromMetadata !== undefined) return fromMetadata
+    for (const [key, value] of Object.entries(values)) {
+      if (/title/i.test(key) && typeof value === 'string' && value.trim().length > 0) return value.trim()
+    }
+    for (const container of ['summary', 'metadata', 'session', 'data', 'view'] as const) {
+      const nested = values[container]
+      if (isRecord(nested)) {
+        for (const [key, value] of Object.entries(nested)) {
+          if (/title/i.test(key) && typeof value === 'string' && value.trim().length > 0) return value.trim()
+        }
+      }
+    }
+  }
+  const direct = trimText(session.title)
+  if (direct !== undefined) return direct
+  return session.blank ? '新对话' : '会话'
+}
+
+function trimText(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined
 }
 
 export function historyEntriesFromRecords(records: unknown[]): HarnessHistoryEntry[] {

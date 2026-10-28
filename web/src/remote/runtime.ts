@@ -10,7 +10,7 @@
  */
 import { AgentAcpClient, type AcpAgentBackend, type AgentAcpFrameData, type AcpStream } from './acp-client'
 import { RemoteClientCore, RemoteRpcError } from './client-core'
-import { HarnessClient, type HarnessRemoteSession } from './harness-client'
+import { HarnessClient, deriveSessionTitle, type HarnessRemoteSession } from './harness-client'
 import { ensureIdentity, WEB_CLIENT_VERSION } from './identity'
 import {
   applyAgentFrame,
@@ -318,7 +318,7 @@ export class SessionRuntime {
   private toDshEntry(item: HarnessRemoteSession): SessionEntry {
     return {
       conversationId: item.sessionId,
-      title: item.title || (item.blank ? '新对话' : item.sessionId),
+      title: deriveSessionTitle(item),
       createdAt: item.updatedAt,
       updatedAt: item.updatedAt,
       kind: 'dsh',

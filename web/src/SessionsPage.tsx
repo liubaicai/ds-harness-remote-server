@@ -22,8 +22,9 @@ import {
   SettingOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { navigate } from './nav'
+import { Markdown } from './markdown'
 import { ThemeToggle } from './ThemeToggle'
 import {
   SessionRuntime,
@@ -89,6 +90,7 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
   const [creating, setCreating] = useState(false)
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [quickOpen, setQuickOpen] = useState(false)
+  const autoTried = useRef(false)
   const bottomRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
 
@@ -114,11 +116,31 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
     () => snapshot.dshSessions.concat(snapshot.sessions).find(item => item.conversationId === snapshot.activeSessionId),
     [snapshot.dshSessions, snapshot.sessions, snapshot.activeSessionId],
   )
+  // Native DSH sessions grouped by workspace (cwd), like the Host's own UI.
+  const dshGroups = useMemo(() => {
+    const groups = new Map<string, SessionEntry[]>()
+    for (const entry of snapshot.dshSessions) {
+      const key = entry.path ?? ''
+      const list = groups.get(key)
+      if (list) list.push(entry)
+      else groups.set(key, [entry])
+    }
+    return [...groups.entries()].sort((a, b) => b[1].length - a[1].length)
+  }, [snapshot.dshSessions])
 
   const connect = useCallback(async () => {
     if (!host) return
     try { await runtime.connect(host) } catch { /* snapshot carries the error */ }
   }, [runtime, host])
+
+  // Entering from the device list (or opening the page) auto-connects the
+  // selected Host and loads its session catalog — no extra click.
+  useEffect(() => {
+    if (autoTried.current || !host || !host.online) return
+    if (snapshot.connection !== 'idle') return
+    autoTried.current = true
+    void connect()
+  }, [host, snapshot.connection, connect])
 
   const openSession = useCallback(async (entry: SessionEntry) => {
     try {
@@ -236,10 +258,17 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
       </div>
 
       <div className="dsh-side-scroll">
-        {/* 原生 DSH 会话 */}
-        {snapshot.dshAvailable && snapshot.dshSessions.length > 0 && (
-          <div className="dsh-ws-group">
-            {snapshot.dshSessions.map(entry => (
+        {/* 原生 DSH 会话：按工作区分组 */}
+        {snapshot.dshAvailable && dshGroups.map(([path, entries]) => {
+          const key = `dsh:${path}`
+          const open = !collapsed[key]
+          return <div className="dsh-ws-group" key={key}>
+            <button className="dsh-ws-head" onClick={() => setCollapsed(current => ({ ...current, [key]: !current[key] }))}>
+              <FolderOutlined />
+              <span className="dsh-ws-name">{path ? basename(path) : '其他会话'}</span>
+              <span className={`dsh-ws-chevron ${open ? 'is-open' : ''}`}>⌄</span>
+            </button>
+            {open && entries.map(entry => (
               <button key={entry.conversationId}
                 className={`dsh-session-row ${snapshot.activeSessionId === entry.conversationId ? 'is-active' : ''}`}
                 onClick={() => void openSession(entry)}>
@@ -248,8 +277,8 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
               </button>
             ))}
           </div>
-        )}
-        {snapshot.dshAvailable && snapshot.dshSessions.length === 0 && snapshot.workspaces.length === 0 && (
+        })}
+        {snapshot.dshAvailable && dshGroups.length === 0 && snapshot.workspaces.length === 0 && (
           <div className="dsh-empty"><div className="dsh-empty-sub">Host 上暂无 DSH 会话，点上方 ＋ 新建。</div></div>
         )}
         {/* Agent ACP 工作区 */}
@@ -421,22 +450,6 @@ function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path
 }
 
-/** 轻量富文本：**加粗** 与 `行内代码`，其余按纯文本（DSH 回复即此风格）。 */
-function renderRich(text: string) {
-  const nodes: ReactNode[] = []
-  const pattern = /(\*\*[^*\n]+\*\*|`[^`\n]+`)/g
-  let last = 0, key = 0, match: RegExpExecArray | null
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > last) nodes.push(text.slice(last, match.index))
-    const token = match[0]
-    if (token.startsWith('**')) nodes.push(<strong key={key++}>{token.slice(2, -2)}</strong>)
-    else nodes.push(<code key={key++}>{token.slice(1, -1)}</code>)
-    last = match.index + token.length
-  }
-  if (last < text.length) nodes.push(text.slice(last))
-  return nodes
-}
-
 function groupWorkspaces(workspaces: WorkspaceEntry[]): WorkspaceEntry[] {
   const seen = new Set<string>()
   return workspaces.filter(workspace => {
@@ -480,7 +493,7 @@ function ChatRow({ item, onCopy, onDecision }: {
           <pre>{item.reasoning}</pre>
         </details>
       )}
-      {item.text.length > 0 && <div className="dsh-assistant-text">{renderRich(item.text)}</div>}
+      {item.text.length > 0 && <div className="dsh-assistant-text"><Markdown text={item.text} /></div>}
       <div className="dsh-msg-meta">
         {item.text.length > 0 && <button className="dsh-meta-btn" onClick={() => onCopy(item.text)}><CopyOutlined /></button>}
         {item.streaming && <span className="dsh-streaming-dots"><i /><i /><i /></span>}
