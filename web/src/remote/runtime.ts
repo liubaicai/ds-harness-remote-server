@@ -76,6 +76,8 @@ export interface RuntimeSnapshot {
   prompting: boolean
   promptError?: string
   historyLoaded: boolean
+  /** A session snapshot is being fetched — the chat area shows a loader. */
+  historyLoading: boolean
 }
 
 type Listener = (snapshot: RuntimeSnapshot) => void
@@ -217,6 +219,7 @@ export class SessionRuntime {
     items: [],
     prompting: false,
     historyLoaded: false,
+    historyLoading: false,
   }
   private readonly listeners = new Set<Listener>()
   private activePath?: string
@@ -448,6 +451,7 @@ export class SessionRuntime {
       prompting: false,
       promptError: undefined,
       historyLoaded: false,
+      historyLoading: false,
     })
     this.liveItems = []
     this.historyItems = []
@@ -566,6 +570,7 @@ export class SessionRuntime {
       prompting: false,
       promptError: undefined,
       historyLoaded: false,
+      historyLoading: !fresh,
     })
     this.activePath = cwd
     this.activeBackend = undefined
@@ -616,11 +621,12 @@ export class SessionRuntime {
         this.historyItems = foldHistoryEvents(entries as unknown[])
       }
       this.publishItems()
-      this.patch({ historyLoaded: true })
+      this.patch({ historyLoaded: true, historyLoading: false })
     } catch (error) {
       // Superseded by another open (or by disconnect): a cancelled request is
-      // normal, never a user-facing failure.
+      // normal, never a user-facing failure. A newer open owns the loader then.
       if (abort.signal.aborted || isAbortError(error)) return
+      this.patch({ historyLoading: false })
       throw error
     }
   }
@@ -644,6 +650,7 @@ export class SessionRuntime {
       prompting: false,
       promptError: undefined,
       historyLoaded: false,
+      historyLoading: !fresh,
     })
     const resolvedBackend = backend ?? backendFromSessionId(sessionId)
     this.activeBackend = resolvedBackend
@@ -654,7 +661,10 @@ export class SessionRuntime {
         await acp.loadSession(sessionId, resolvedBackend, abort.signal)
       } catch (error) {
         if (abort.signal.aborted) return
-        if (!(error instanceof RemoteRpcError)) throw error
+        if (!(error instanceof RemoteRpcError)) {
+          this.patch({ historyLoading: false })
+          throw error
+        }
       }
       try {
         const events = await acp.loadSessionHistory(sessionId, resolvedBackend, abort.signal)
@@ -665,7 +675,7 @@ export class SessionRuntime {
         // History is optional; live stream still renders from now on.
       }
     }
-    this.patch({ historyLoaded: true })
+    this.patch({ historyLoaded: true, historyLoading: false })
     try {
       this.stream = await acp.openStream(sessionId, frame => this.onFrame(sessionId, frame), undefined, abort.signal)
     } catch (error) {

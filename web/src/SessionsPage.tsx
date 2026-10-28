@@ -344,25 +344,36 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
       </header>
 
       <div className="dsh-chat-scroll">
-        {snapshot.items.length === 0
-          ? <div className="dsh-empty">
-            <ThunderboltOutlined style={{ fontSize: 30, opacity: 0.35 }} />
-            <div className="dsh-empty-title">{snapshot.activeSessionId ? '开始对话' : '选择或新建一个会话'}</div>
-            <div className="dsh-empty-sub">
-              {snapshot.activeSessionId
-                ? '输入第一条消息，回复将经 Noise IK 端到端加密通道流式返回。'
-                : '从左侧工作区打开历史会话，或点击「新建对话」创建。'}
+        {snapshot.historyLoading
+          ? <div className="dsh-loading" role="status" aria-live="polite">
+            <div className="dsh-loading-head">
+              <span className="dsh-spinner" />
+              <span>正在加载会话快照…</span>
             </div>
+            <div className="dsh-skeleton">
+              <i style={{ width: '46%' }} /><i style={{ width: '88%' }} /><i style={{ width: '72%' }} /><i style={{ width: '58%' }} />
+            </div>
+            <div className="dsh-loading-sub">经 Noise IK 端到端加密通道读取历史消息</div>
           </div>
-          : <div className="dsh-chat-column">
-            {snapshot.items.map(item => (
-              <ChatRow key={item.id} item={item} onCopy={copyText}
-                onDecision={(approvalId, decision) => void runtime.respondPermission(approvalId, decision)
-                  .catch(err => message.error(String(err)))} />
-            ))}
-            {snapshot.prompting && <div className="dsh-msg"><div className="dsh-turn-status is-live">生成中<span className="dsh-streaming-dots"><i /><i /><i /></span></div></div>}
-            <div ref={bottomRef} />
-          </div>}
+          : snapshot.items.length === 0
+            ? <div className="dsh-empty">
+              <ThunderboltOutlined style={{ fontSize: 30, opacity: 0.35 }} />
+              <div className="dsh-empty-title">{snapshot.activeSessionId ? '开始对话' : '选择或新建一个会话'}</div>
+              <div className="dsh-empty-sub">
+                {snapshot.activeSessionId
+                  ? '输入第一条消息，回复将经 Noise IK 端到端加密通道流式返回。'
+                  : '从左侧工作区打开历史会话，或点击「新建对话」创建。'}
+              </div>
+            </div>
+            : <div className="dsh-chat-column">
+              {snapshot.items.map(item => (
+                <ChatRow key={item.id} item={item} onCopy={copyText}
+                  onDecision={(approvalId, decision) => void runtime.respondPermission(approvalId, decision)
+                    .catch(err => message.error(String(err)))} />
+              ))}
+              {snapshot.prompting && <div className="dsh-msg"><div className="dsh-turn-status is-live">生成中<span className="dsh-streaming-dots"><i /><i /><i /></span></div></div>}
+              <div ref={bottomRef} />
+            </div>}
         {snapshot.promptError && <div className="dsh-error-bar">{snapshot.promptError}</div>}
       </div>
 
@@ -378,7 +389,7 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
             rows={1}
             placeholder="输入消息..."
             value={draft}
-            disabled={!snapshot.activeSessionId || snapshot.prompting}
+            disabled={!snapshot.activeSessionId || snapshot.prompting || snapshot.historyLoading}
             onChange={event => setDraft(event.target.value)}
             onKeyDown={event => {
               if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); void send() }
@@ -414,7 +425,7 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
             </span>
             {snapshot.prompting
               ? <button className="dsh-send-btn is-stop" title="停止" onClick={() => void runtime.cancelPrompt()}>■</button>
-              : <button className="dsh-send-btn" title="发送" disabled={!snapshot.activeSessionId || draft.trim().length === 0} onClick={() => void send()}><ArrowUpOutlined /></button>}
+              : <button className="dsh-send-btn" title="发送" disabled={!snapshot.activeSessionId || draft.trim().length === 0 || snapshot.historyLoading} onClick={() => void send()}><ArrowUpOutlined /></button>}
           </div>
         </div>
         <div className="dsh-composer-note">对话全程加密，远程操作受 DeepSeek Harness 权限控制。</div>

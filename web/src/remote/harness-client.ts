@@ -149,17 +149,17 @@ export class HarnessClient {
    * Subagent sessions must be opened with their durable parent
    * (`parentSessionId`) or the Host rejects the plain session form.
    *
-   * The snapshot is deliberately small (upstream default: 16 messages): one
-   * oversized frame is rejected by the Host with "Oversized Harness Remote
-   * frame" when it cannot be chunked. Older history is paged in through
-   * `pageHistory` instead.
+   * The snapshot is deliberately small (8 messages, half the upstream default):
+   * one oversized frame is rejected by the Host with "Oversized Harness Remote
+   * frame" when it cannot be chunked, and a smaller first paint is faster.
+   * Older history is paged in through `pageHistory` instead.
    */
   async follow(
     sessionId: string,
     onEntry: (entries: HarnessHistoryEntry[]) => void,
     signal?: AbortSignal,
     parentSessionId?: string,
-    maxMessages = 16,
+    maxMessages = 8,
   ): Promise<HarnessFollowSnapshot> {
     await this.closeFollow(false)
     // Host versions disagree about `session/follow`'s schema: an unknown field
