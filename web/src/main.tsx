@@ -34,10 +34,17 @@ function App() {
     })
   }, [])
   // These Ant Design tokens are retained from the upstream App.tsx ConfigProvider.
+  // Signed-out guard: bounce protected routes back to login. Login success
+  // redirects from the effect below — inside the commit where `account` is
+  // already set — so this guard can never see a just-logged-in user and kick
+  // them back (the "first login click does nothing" race).
   useEffect(() => {
     if (account === null && (path === '/app/remote' || path === '/app/sessions')) navigate('/app/login')
   }, [account, path])
-  const login = useCallback((next: Account) => { setAccount(next); navigate('/app/remote') }, [])
+  useEffect(() => {
+    if (account && path === '/app/login') navigate('/app/remote')
+  }, [account, path])
+  const login = useCallback((next: Account) => { setAccount(next) }, [])
   const product = account !== undefined && account !== null && (path === '/app/remote' || path === '/app/sessions')
   const content = account === undefined
     ? <div className="route-loading auth-route-loading" role="status">正在检查登录状态…</div>
