@@ -75,10 +75,18 @@ interface FollowHandle {
   assistant?: AssistantStreamState
 }
 
+interface OpenedFollow {
+  iterator: AsyncIterator<unknown>
+  snapshot: HarnessFollowSnapshot
+  leading: HarnessHistoryEntry[]
+}
+
 export class HarnessClient {
   private readonly gateway: RemoteTypertGateway
   private readonly sessionFormat: 3 | undefined
   private followHandle?: FollowHandle
+  /** Latest snapshot cursor per session (`throughSeq` for older-history pages). */
+  private readonly followCursors = new Map<string, number>()
 
   constructor(core: RemoteClientCore, sessionFormat?: 3) {
     this.gateway = new RemoteTypertGateway(core)
@@ -131,62 +139,51 @@ export class HarnessClient {
    *
    * Subagent sessions must be opened with their durable parent
    * (`parentSessionId`) or the Host rejects the plain session form.
+   *
+   * The snapshot is deliberately small (upstream default: 16 messages): one
+   * oversized frame is rejected by the Host with "Oversized Harness Remote
+   * frame" when it cannot be chunked. Older history is paged in through
+   * `pageHistory` instead.
    */
   async follow(
     sessionId: string,
     onEntry: (entries: HarnessHistoryEntry[]) => void,
     signal?: AbortSignal,
     parentSessionId?: string,
+    maxMessages = 16,
   ): Promise<HarnessFollowSnapshot> {
     await this.closeFollow(false)
-    const controller = new AbortController()
-    const abortForward = () => controller.abort()
-    signal?.addEventListener('abort', abortForward, { once: true })
-    const handle: FollowHandle = { controller }
-    this.followHandle = handle
-    const request = {
-      args: {
-        request: {
-          address: sessionAddress(sessionId, parentSessionId),
-          maxMessages: 200,
-          ...(this.sessionFormat === 3 ? { assistantStream: true as const } : {}),
-        },
-      },
-    }
-    let source
-    try {
-      source = await this.gateway.open('session/follow', request, controller.signal, { transferFrames: true })
-    } catch (error) {
-      // Hosts whose stream schema predates `transferFrames` reject the flag.
-      if (controller.signal.aborted) throw error
-      source = await this.gateway.open('session/follow', request, controller.signal)
-    }
-    this.followHandle.stream = source
-    const iterator = source[Symbol.asyncIterator]()
-
-    // Find the snapshot, skipping control preludes; history may also arrive as
-    // ordinary event/chunk frames with no snapshot envelope at all.
-    const leading: HarnessHistoryEntry[] = []
-    let snapshot: HarnessFollowSnapshot = { entries: [], hasMore: false }
-    for (;;) {
-      const next = await iterator.next()
-      if (next.done) break
-      const value = unwrapEnvelope(next.value)
-      if (!isRecord(value)) continue
-      const records = Array.isArray(value.records) ? value.records : undefined
-      if (records !== undefined || value.type === 'snapshot') {
-        if (this.sessionFormat === 3) handle.assistant = assistantStreamBaseline(value.assistantStream)
-        snapshot = {
-          entries: historyEntriesFromRecords(records ?? []),
-          hasMore: value.hasMore === true,
-          ...(typeof value.cursor === 'number' ? { cursor: value.cursor } : {}),
-        }
+    // A snapshot that still exceeds the single-frame limit is retried with a
+    // smaller window (the Host only chunks frames when `transferFrames` is
+    // supported); older history keeps loading through pageHistory. Each attempt
+    // needs its own controller — a failed attempt aborts the previous one.
+    let opened: OpenedFollow | undefined
+    let handle: FollowHandle | undefined
+    let controller: AbortController | undefined
+    let lastError: unknown
+    for (const size of [maxMessages, 4, 1]) {
+      if (size > maxMessages) continue
+      const attempt = new AbortController()
+      const abortForward = () => attempt.abort()
+      signal?.addEventListener('abort', abortForward, { once: true })
+      const attemptHandle: FollowHandle = { controller: attempt }
+      this.followHandle = attemptHandle
+      try {
+        opened = await this.openFollow(sessionId, parentSessionId, size, attemptHandle, attempt.signal)
+        handle = attemptHandle
+        controller = attempt
         break
+      } catch (error) {
+        lastError = error
+        signal?.removeEventListener('abort', abortForward)
+        if (attempt.signal.aborted || !isOversizedFrameError(error)) throw error
+        await this.closeFollow(false).catch(() => undefined)
       }
-      const entries = this.entriesFromSessionFollow(handle, value)
-      if (entries.length > 0) leading.push(...entries)
-      // Unknown control values (ready/baseline/…) are skipped silently.
     }
+    if (opened === undefined || handle === undefined || controller === undefined) {
+      throw lastError ?? new RemoteGatewayError('STREAM_FAILED', '会话快照加载失败。')
+    }
+    const { iterator, snapshot, leading } = opened
 
     const pump = (entries: HarnessHistoryEntry[]) => {
       if (entries.length > 0 && !controller.signal.aborted) onEntry(entries)
@@ -204,6 +201,62 @@ export class HarnessClient {
       }
     })()
     return snapshot
+  }
+
+  /** Open one follow stream and read its snapshot with a bounded window. */
+  private async openFollow(
+    sessionId: string,
+    parentSessionId: string | undefined,
+    maxMessages: number,
+    handle: FollowHandle,
+    signal: AbortSignal,
+  ): Promise<OpenedFollow> {
+    const request = {
+      args: {
+        request: {
+          address: sessionAddress(sessionId, parentSessionId),
+          maxMessages,
+          ...(this.sessionFormat === 3 ? { assistantStream: true as const } : {}),
+        },
+      },
+    }
+    let source
+    try {
+      source = await this.gateway.open('session/follow', request, signal, { transferFrames: true })
+    } catch (error) {
+      // Only a schema rejection (Host predates `transferFrames`) may retry
+      // without the flag — any other failure must surface unchanged.
+      if (signal.aborted || !isUnknownFieldError(error)) throw error
+      source = await this.gateway.open('session/follow', request, signal)
+    }
+    this.followHandle && (this.followHandle.stream = source)
+    const iterator = source[Symbol.asyncIterator]()
+
+    // Find the snapshot, skipping control preludes; history may also arrive as
+    // ordinary event/chunk frames with no snapshot envelope at all.
+    const leading: HarnessHistoryEntry[] = []
+    let snapshot: HarnessFollowSnapshot = { entries: [], hasMore: false }
+    for (;;) {
+      const next = await iterator.next()
+      if (next.done) break
+      const value = unwrapEnvelope(next.value)
+      if (!isRecord(value)) continue
+      const records = Array.isArray(value.records) ? value.records : undefined
+      if (records !== undefined || value.type === 'snapshot') {
+        if (this.sessionFormat === 3) handle.assistant = assistantStreamBaseline(value.assistantStream)
+        if (typeof value.cursor === 'number') this.followCursors.set(sessionId, value.cursor)
+        snapshot = {
+          entries: historyEntriesFromRecords(records ?? []),
+          hasMore: value.hasMore === true,
+          ...(typeof value.cursor === 'number' ? { cursor: value.cursor } : {}),
+        }
+        break
+      }
+      const entries = this.entriesFromSessionFollow(handle, value)
+      if (entries.length > 0) leading.push(...entries)
+      // Unknown control values (ready/baseline/…) are skipped silently.
+    }
+    return { iterator, snapshot, leading }
   }
 
   /**
@@ -240,6 +293,33 @@ export class HarnessClient {
         data: { turn: attempt.turn, step: attempt.step, chunk: frame.chunk },
       },
     }]
+  }
+
+  /**
+   * One older-history page (`session/page`), newest-first before `beforeSeq`.
+   * Each page is a normal RPC response, so large sessions never need a single
+   * oversized follow frame.
+   */
+  async pageHistory(
+    sessionId: string,
+    beforeSeq: number,
+    maxMessages = 60,
+    parentSessionId?: string,
+  ): Promise<HarnessFollowSnapshot> {
+    const throughSeq = this.followCursors.get(sessionId) ?? beforeSeq
+    const page = await this.callValue<{ records?: unknown[]; hasMore?: boolean }>('session/page', {
+      request: {
+        address: sessionAddress(sessionId, parentSessionId),
+        throughSeq,
+        beforeSeq,
+        maxMessages,
+      },
+    })
+    return {
+      entries: historyEntriesFromRecords(Array.isArray(page.records) ? page.records : []),
+      hasMore: page.hasMore === true,
+      ...(throughSeq === undefined ? {} : { cursor: throughSeq }),
+    }
   }
 
   async closeFollow(notifyRemote = true): Promise<void> {
@@ -422,6 +502,22 @@ function clientTimeZone(): string | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+/**
+ * A Host whose stream-open schema predates `transferFrames` rejects the flag
+ * itself (strict zod schema: "unrecognized key"). Only that rejection justifies
+ * retrying the open without the flag; real stream failures must surface.
+ */
+function isUnknownFieldError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /unrecognized key|unknown field|unexpected (?:key|property)|invalid (?:input|arguments)/i.test(message)
+}
+
+/** The Host refuses single frames above its secure-message limit. */
+function isOversizedFrameError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /oversized harness remote frame|frame exceeds|too large/i.test(message)
 }
 
 /** Some Host versions wrap stream values in `{ok,value}` result envelopes. */

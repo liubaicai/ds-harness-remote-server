@@ -133,6 +133,12 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
     try { await runtime.connect(host) } catch { /* snapshot carries the error */ }
   }, [runtime, host])
 
+  /** Toast a failure, but stay quiet for cancellations (session switches). */
+  const reportError = useCallback((error: unknown) => {
+    const text = explainError(error)
+    if (text.length > 0) void message.error(text)
+  }, [message])
+
   // Entering from the device list (or opening the page) auto-connects the
   // selected Host and loads its session catalog — no extra click.
   useEffect(() => {
@@ -147,17 +153,17 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
       if (entry.kind === 'dsh') await runtime.openDshSession(entry.conversationId, entry.path, false, entry)
       else await runtime.openSession(entry.conversationId, entry.backend, entry.path)
     } catch (error) {
-      void message.error(explainError(error))
+      reportError(error)
     }
-  }, [runtime, message])
+  }, [runtime, reportError])
 
   const openWorkspace = useCallback(async (workspace: WorkspaceEntry) => {
     try {
       await runtime.loadSessions(workspace.path, workspace.backend)
     } catch (error) {
-      void message.error(explainError(error))
+      reportError(error)
     }
-  }, [runtime, message])
+  }, [runtime, reportError])
 
   const createSession = useCallback(async () => {
     const path = newPath.trim()
@@ -169,11 +175,11 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
       setNewOpen(false)
       setNewPath('')
     } catch (error) {
-      void message.error(explainError(error))
+      reportError(error)
     } finally {
       setCreating(false)
     }
-  }, [runtime, newPath, newKind, newBackend, snapshot.backends, message])
+  }, [runtime, newPath, newKind, newBackend, snapshot.backends, reportError])
 
   const send = useCallback(async () => {
     const text = draft
@@ -182,9 +188,9 @@ export function SessionsPage({ onSignedOut }: { onSignedOut: () => void }) {
     try {
       await runtime.sendPrompt(text)
     } catch (error) {
-      void message.error(explainError(error))
+      reportError(error)
     }
-  }, [runtime, draft, snapshot.prompting, message])
+  }, [runtime, draft, snapshot.prompting, reportError])
 
   const copyText = useCallback((text: string) => {
     void navigator.clipboard.writeText(text).then(() => message.success('已复制'))

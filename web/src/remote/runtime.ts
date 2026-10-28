@@ -82,6 +82,19 @@ type Listener = (snapshot: RuntimeSnapshot) => void
 
 const ACP_BACKENDS = ['cursor', 'antigravity', 'pi', 'opencode', 'claude'] as const
 
+/** Bound on older-history pages fetched after the (deliberately small) follow snapshot. */
+const MAX_HISTORY_BACKFILL_PAGES = 6
+
+/** Oldest native event seq in a page — the `beforeSeq` cursor for the next page. */
+function oldestSeq(entries: ReadonlyArray<{ event?: { seq?: unknown } }>): number | undefined {
+  let oldest: number | undefined
+  for (const entry of entries) {
+    const seq = entry.event?.seq
+    if (typeof seq === 'number' && (oldest === undefined || seq < oldest)) oldest = seq
+  }
+  return oldest
+}
+
 interface HarnessFeatures {
   capabilities: string[]
   remoteGateway: boolean
@@ -142,14 +155,27 @@ async function describeHarness(core: RemoteClientCore): Promise<HarnessFeatures>
   return { capabilities, remoteGateway, ...(remoteV3 ? { sessionFormat: 3 as const } : {}), acpBackends }
 }
 
+/** A cancelled request (session switch / disconnect) is not a failure. */
+function isAbortError(error: unknown): boolean {
+  const code = (error as { code?: string } | undefined)?.code
+  if (code === 'RPC_ABORTED' || code === 'CANCELLED' || code === 'ABORT_ERR') return true
+  const name = (error as { name?: string } | undefined)?.name
+  if (name === 'AbortError') return true
+  return error instanceof Error && /\bwas aborted\b|aborted|abort/i.test(error.message)
+}
+
 export function explainError(error: unknown): string {
   if (!(error instanceof Error)) return String(error)
   const code = (error as { code?: string }).code
+  if (code === 'RPC_ABORTED' || code === 'CANCELLED') return ''
   if (code === 'METHOD_NOT_ALLOWED' || /disabled or unavailable/i.test(error.message)) {
     return `Host 未启用该 Agent 后端（${error.message}）。如需 Agent 会话请在 Host 插件配置 acp.enabled / acp.backends；DSH 会话不受影响。`
   }
   if (/durable parent address|subagent sessions/i.test(error.message)) {
     return '该会话是子代理会话，需要通过父会话地址打开。已自动重试父地址；若仍失败请从父会话进入。'
+  }
+  if (/oversized harness remote frame/i.test(error.message)) {
+    return '会话历史超过 Host 的单帧上限。已自动缩小快照窗口重试；若仍失败，请让 Host 插件升级以支持分片传输。'
   }
   if (code === 'SESSION_NOT_FOUND') return '会话不存在或已被清理。'
   if (code === 'HOST_OFFLINE') return 'Host 离线，请检查 Host 插件后重连。'
@@ -179,6 +205,14 @@ export class SessionRuntime {
   private liveItems: ChatItem[] = []
   private historyItems: ChatItem[] = []
   private sessionAbort?: AbortController
+  /** Last connected Host — the target of silent auto-reconnect. */
+  private host?: HostSummary
+  /** Set by an explicit disconnect; suppresses auto-reconnect. */
+  private manualDisconnect = true
+  /** True while teardown runs — a close caused by us is not a drop. */
+  private tearingDown = false
+  private reconnectTimer?: ReturnType<typeof setTimeout>
+  private reconnectAttempts = 0
 
   subscribe(listener: Listener): () => void {
     this.listeners.add(listener)
@@ -195,7 +229,15 @@ export class SessionRuntime {
   }
 
   async connect(host: HostSummary): Promise<void> {
+    this.clearReconnect()
     await this.disconnect()
+    this.manualDisconnect = false
+    this.host = host
+    await this.openConnection(host, false)
+  }
+
+  /** Establish the encrypted carrier and discover Host capabilities. */
+  private async openConnection(host: HostSummary, silent: boolean): Promise<void> {
     this.patch({ connection: 'connecting', connectionError: undefined, acpNote: undefined })
     try {
       const identity = await ensureIdentity()
@@ -207,9 +249,7 @@ export class SessionRuntime {
         clientIdentityKey: identity.publicKey,
         clientVersion: WEB_CLIENT_VERSION,
         onClose: event => {
-          if (this.snapshot.connection === 'connected' || this.snapshot.connection === 'connecting') {
-            this.patch({ connection: 'disconnected', connectionError: event.reason })
-          }
+          this.handleConnectionLost(event.reason ?? '连接已断开。')
         },
       })
       const transport = new SecureTransport(link, {
@@ -218,9 +258,7 @@ export class SessionRuntime {
       })
       const core = new RemoteClientCore(transport, 35_000)
       core.onClose(error => {
-        if (this.core === core) {
-          this.patch({ connection: 'disconnected', connectionError: error?.message ?? '连接已断开。', prompting: false })
-        }
+        if (this.core === core) this.handleConnectionLost(error?.message ?? '连接已断开。')
       })
       await core.connect()
       this.core = core
@@ -260,13 +298,76 @@ export class SessionRuntime {
       })
       await this.refreshCatalog()
     } catch (error) {
+      if (silent) {
+        // A background reconnect attempt failed: keep retrying quietly instead
+        // of flashing a failure banner at the user.
+        await this.teardown()
+        this.scheduleReconnect()
+        throw error
+      }
       this.patch({ connection: 'failed', connectionError: explainError(error) })
       await this.teardown()
       throw error
     }
   }
 
+  /** A transport that dropped on its own: reconnect silently, keep the UI. */
+  private handleConnectionLost(reason: string): void {
+    if (this.tearingDown) return
+    if (this.manualDisconnect) {
+      this.patch({ connection: 'disconnected', connectionError: reason })
+      return
+    }
+    this.patch({ connection: 'connecting', connectionError: undefined, prompting: false })
+    this.scheduleReconnect()
+  }
+
+  private scheduleReconnect(): void {
+    if (this.manualDisconnect || this.host === undefined || this.reconnectTimer !== undefined) return
+    const attempt = this.reconnectAttempts
+    // 1s, 2s, 4s, 8s, capped at 10s.
+    const delay = Math.min(1000 * 2 ** attempt, 10_000)
+    this.reconnectAttempts = attempt + 1
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = undefined
+      this.reconnect()
+    }, delay)
+  }
+
+  private clearReconnect(): void {
+    if (this.reconnectTimer !== undefined) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = undefined
+    }
+    this.reconnectAttempts = 0
+  }
+
+  /** Silent reconnect: restore the carrier and reopen the last session. */
+  private reconnect(): void {
+    const host = this.host
+    if (this.manualDisconnect || host === undefined) return
+    const sessionId = this.snapshot.activeSessionId
+    const kind = this.snapshot.activeKind
+    void (async () => {
+      try {
+        await this.teardown()
+        await this.openConnection(host, true)
+        this.reconnectAttempts = 0
+        // Reopen whatever was on screen before the drop.
+        if (sessionId !== undefined) {
+          const entry = this.snapshot.dshSessions.find(item => item.conversationId === sessionId)
+          if (kind === 'dsh') await this.openDshSession(sessionId, entry?.path ?? this.activePath, false, entry).catch(() => undefined)
+          else if (kind === 'acp') await this.openSession(sessionId, this.activeBackend, this.activePath).catch(() => undefined)
+        }
+      } catch {
+        // openConnection already scheduled the next attempt.
+      }
+    })()
+  }
+
   async disconnect(): Promise<void> {
+    this.manualDisconnect = true
+    this.clearReconnect()
     await this.teardown()
     this.patch({
       connection: 'idle',
@@ -404,29 +505,60 @@ export class SessionRuntime {
     })
     this.activePath = cwd
     this.activeBackend = undefined
-    // Subagent sessions need their durable parent address; forks (parent link
-    // without the subagent origin) stay on the plain session form unless the
-    // Host insists — then retry once through the parent address.
-    const parent = entry?.subagent ? entry.parentSessionId : undefined
-    const snapshot = await harness.follow(sessionId, entries => {
-      if (abort.signal.aborted) return
-      this.liveItems = foldNativeEvents(this.liveItems, entries as unknown[])
-      this.publishItems()
-    }, abort.signal, parent).catch(async error => {
-      const wantsParent = parent === undefined
-        && entry?.parentSessionId !== undefined
-        && /durable parent|subagent/i.test(error instanceof Error ? error.message : '')
-      if (!wantsParent || abort.signal.aborted) throw error
-      return harness.follow(sessionId, entries => {
+    try {
+      // Subagent sessions need their durable parent address; forks (parent link
+      // without the subagent origin) stay on the plain session form unless the
+      // Host insists — then retry once through the parent address.
+      const parent = entry?.subagent ? entry.parentSessionId : undefined
+      const snapshot = await harness.follow(sessionId, entries => {
         if (abort.signal.aborted) return
         this.liveItems = foldNativeEvents(this.liveItems, entries as unknown[])
         this.publishItems()
-      }, abort.signal, entry.parentSessionId)
-    })
-    if (abort.signal.aborted) return
-    if (!fresh) this.historyItems = foldHistoryEvents(snapshot.entries as unknown[])
-    this.publishItems()
-    this.patch({ historyLoaded: true })
+      }, abort.signal, parent).catch(async error => {
+        const wantsParent = parent === undefined
+          && entry?.parentSessionId !== undefined
+          && /durable parent|subagent/i.test(error instanceof Error ? error.message : '')
+        if (!wantsParent || abort.signal.aborted) throw error
+        return harness.follow(sessionId, entries => {
+          if (abort.signal.aborted) return
+          this.liveItems = foldNativeEvents(this.liveItems, entries as unknown[])
+          this.publishItems()
+        }, abort.signal, entry.parentSessionId)
+      })
+      if (abort.signal.aborted) return
+      if (!fresh) {
+        // The follow snapshot is deliberately small (the Host rejects oversized
+        // single frames). Backfill older history page by page — each page is a
+        // plain RPC response, so long sessions never need one giant frame.
+        let entries = snapshot.entries
+        let hasMore = snapshot.hasMore
+        let oldest = oldestSeq(entries)
+        let pages = 0
+        const parentForPages = entry?.subagent ? entry.parentSessionId : undefined
+        while (hasMore && oldest !== undefined && pages < MAX_HISTORY_BACKFILL_PAGES && !abort.signal.aborted) {
+          try {
+            const page = await harness.pageHistory(sessionId, oldest, 60, parentForPages)
+            if (page.entries.length === 0) break
+            entries = [...page.entries, ...entries]
+            hasMore = page.hasMore
+            const nextOldest = oldestSeq(page.entries)
+            if (nextOldest === undefined || nextOldest >= oldest) break
+            oldest = nextOldest
+            pages += 1
+          } catch {
+            break
+          }
+        }
+        this.historyItems = foldHistoryEvents(entries as unknown[])
+      }
+      this.publishItems()
+      this.patch({ historyLoaded: true })
+    } catch (error) {
+      // Superseded by another open (or by disconnect): a cancelled request is
+      // normal, never a user-facing failure.
+      if (abort.signal.aborted || isAbortError(error)) return
+      throw error
+    }
   }
 
   /** Open an ACP session (agent backend). */
@@ -470,7 +602,13 @@ export class SessionRuntime {
       }
     }
     this.patch({ historyLoaded: true })
-    this.stream = await acp.openStream(sessionId, frame => this.onFrame(sessionId, frame), undefined, abort.signal)
+    try {
+      this.stream = await acp.openStream(sessionId, frame => this.onFrame(sessionId, frame), undefined, abort.signal)
+    } catch (error) {
+      // Superseded by another open (or by disconnect): not a failure.
+      if (abort.signal.aborted || isAbortError(error)) return
+      throw error
+    }
   }
 
   async sendPrompt(text: string): Promise<void> {
@@ -536,20 +674,25 @@ export class SessionRuntime {
   }
 
   private async teardown(): Promise<void> {
-    this.sessionAbort?.abort()
-    this.sessionAbort = undefined
-    if (this.stream) {
-      await this.stream.close().catch(() => undefined)
-      this.stream = undefined
+    this.tearingDown = true
+    try {
+      this.sessionAbort?.abort()
+      this.sessionAbort = undefined
+      if (this.stream) {
+        await this.stream.close().catch(() => undefined)
+        this.stream = undefined
+      }
+      if (this.harness) {
+        await this.harness.close().catch(() => undefined)
+        this.harness = undefined
+      }
+      const core = this.core
+      this.core = undefined
+      this.acp = undefined
+      if (core) await core.close().catch(() => undefined)
+    } finally {
+      this.tearingDown = false
     }
-    if (this.harness) {
-      await this.harness.close().catch(() => undefined)
-      this.harness = undefined
-    }
-    const core = this.core
-    this.core = undefined
-    this.acp = undefined
-    if (core) await core.close().catch(() => undefined)
   }
 }
 
