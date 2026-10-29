@@ -57,6 +57,8 @@ describe.skipIf(!hasCompose)('Docker Compose rendered configuration (no daemon r
   it('renders ordinary startup with no TURN secret and preserves default STUN', () => {
     const rendered = config()
     expect(rendered.services.coturn).toBeUndefined()
+    expect(rendered.services.server.environment.DSH_SERVER_ANDROID_LOGIN_COMPAT).toBe('1')
+    expect(config({ DSH_SERVER_ANDROID_LOGIN_COMPAT: '0' }).services.server.environment.DSH_SERVER_ANDROID_LOGIN_COMPAT).toBe('0')
     expect(rendered.services.server.environment.DSH_SERVER_TURN_SECRET).toBe('')
     expect(rendered.services.server.environment.DSH_SERVER_STUN_URLS).toContain('stun:stun.miwifi.com:3478')
   })

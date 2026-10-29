@@ -1,6 +1,6 @@
 {
   "name": "ds-harness-remote-server",
-  "version": "0.5.19",
+  "version": "0.5.20",
   "private": true,
   "type": "module",
   "description": "Self-hosted Server for DS Harness Remote: device pairing, Control channel, WebRTC brokering (LAN → P2P → TURN → Relay) and STUN/TURN credentials.",

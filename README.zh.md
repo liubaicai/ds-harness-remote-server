@@ -76,6 +76,12 @@ node --env-file=.env dist/main.js
 
 Host 与客户端填同一个 Server 地址，用同一账号登录。账号建议用邮箱，以兼容现有客户端。
 
+## Android v0.5.22 / v0.5.23 登录兼容
+
+这两个 Android 版本在自建服务器没有 OAuth 登录方式时，会把密码按钮一起隐藏。本服务默认启用兼容模式：`/api/v1/auth/oauth/providers` 返回一个占位 GitHub 入口，让客户端显示钥匙形状的密码按钮。**请点击钥匙图标，使用原有服务器账号和密码登录。** GitHub 入口不提供真实 OAuth；误点后只显示返回应用使用密码登录的说明。误点 GitHub 后，请点击提示页的“取消并返回应用”解除客户端登录等待状态；直接按返回键可能导致按钮仍被禁用。如链接无法唤起应用，请完全关闭并重新打开应用。返回链接只发送 OAuth 取消错误，不携带凭据。不接入第三方服务、不提供二维码登录或 OAuth 凭据交换、不绕过密码校验。
+
+升级到已修复空登录列表问题的 Android 客户端后，可设置 `DSH_SERVER_ANDROID_LOGIN_COMPAT=0` 并重启服务或重新创建容器，关闭占位入口。关闭后发现接口返回空列表，密码认证保持不变。本仓库服务端版本号与上游 Android 版本号独立。
+
 ## 配置项
 
 | 环境变量 | 用途 / 默认值 |
@@ -87,6 +93,7 @@ Host 与客户端填同一个 Server 地址，用同一账号登录。账号建�
 | `DSH_SERVER_PORT` | 默认 `8080` |
 | `DSH_SERVER_DATA_FILE` | 默认 `data/state.json`，相对启动目录 |
 | `DSH_SERVER_TRUSTED_PROXIES` | 逗号分隔的可信代理精确 IP/CIDR；默认空（忽略 XFF），仅信任受控代理 |
+| `DSH_SERVER_ANDROID_LOGIN_COMPAT` | 通过占位 GitHub 入口恢复 Android v0.5.22/23 密码按钮；默认 `1`，设为 `0` 关闭 |
 | `DSH_SERVER_WEBRTC` | 是否代理 LAN/P2P/TURN 协商，默认 `1`；设为 `0` 则只走 Relay |
 | `DSH_SERVER_STUN_URLS` | 逗号分隔的 STUN 地址，默认 `stun:stun.miwifi.com:3478,stun:stun.cloudflare.com:3478`；设为空则关闭 STUN |
 | `DSH_SERVER_STUN_PROBE` | 启动时探测 STUN 可达性并把最快的排到最前，默认 `1`；设为 `0` 关闭 |

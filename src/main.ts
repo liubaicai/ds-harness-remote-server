@@ -25,6 +25,7 @@ const app = createRemoteServer({
   publicUrl: process.env.DSH_SERVER_PUBLIC_URL ?? `http://localhost:${port}`,
   dataFile: resolve(process.env.DSH_SERVER_DATA_FILE ?? 'data/state.json'),
   webrtc: !['0', 'false', 'off', 'no'].includes((process.env.DSH_SERVER_WEBRTC ?? '').trim().toLowerCase()),
+  androidLoginCompat: !['0', 'false', 'off', 'no'].includes((process.env.DSH_SERVER_ANDROID_LOGIN_COMPAT ?? '').trim().toLowerCase()),
   ice,
   trustedProxies: (process.env.DSH_SERVER_TRUSTED_PROXIES ?? '').split(',').map(value => value.trim()).filter(Boolean),
 })

@@ -109,6 +109,66 @@ const cleanupScenario2 = async () => {
 }
 afterEach(cleanupScenario2)
 
+describe('Android password login compatibility', () => {
+  it('advertises a known provider without QR support, so Android reveals the password entry', async () => {
+    const result = await request('/auth/oauth/providers')
+    expect(result.status).toBe(200)
+    expect(result.headers.get('cache-control')).toBe('no-store')
+    expect(result.headers.get('set-cookie')).toBeNull()
+    expect(result.data).toEqual({ items: [{
+      id: 'github', displayName: 'Password login compatibility', startUrl: '/api/v1/auth/oauth/github/start',
+    }] })
+    // Mirrors Android v0.5.23's known-provider filter and password-button gate.
+    const oauthMethods = ['zhihu', 'github', 'google'].filter(id => result.data.items.some((p: { id: string }) => p.id === id))
+    expect(oauthMethods.length).toBeGreaterThan(0)
+    expect(result.data.items.every((p: { qrStartUrl?: string }) => p.qrStartUrl === undefined)).toBe(true)
+  })
+
+  it('shows only instructions on OAuth start and never authenticates or reflects callback parameters', async () => {
+    const response = await fetch(`${base}/api/v1/auth/oauth/github/start?redirect_uri=https://attacker.example&state=untrusted-marker&code=fake`, { redirect: 'manual' })
+    expect(response.status).toBe(501)
+    expect(response.headers.get('content-type')).toBe('text/html; charset=utf-8')
+    expect(response.headers.get('cache-control')).toBe('no-store')
+    expect(response.headers.get('content-security-policy')).toContain("frame-ancestors 'none'")
+    expect(response.headers.get('location')).toBeNull()
+    expect(response.headers.get('set-cookie')).toBeNull()
+    const html = await response.text()
+    expect(html).toContain('点击钥匙图标')
+    expect(html).toContain('tap the key icon')
+    expect(html).not.toContain('attacker.example')
+    expect(html).not.toContain('untrusted-marker')
+    const cancelHref = html.match(/href="([^"]+)"/)?.[1]?.replaceAll('&amp;', '&')
+    expect(cancelHref).toBeDefined()
+    const cancel = new URL(cancelHref!)
+    expect(cancel.protocol).toBe('dshremote:')
+    expect(cancel.hostname).toBe('oauth')
+    expect(cancel.searchParams.get('error')).toBe('password_login_required')
+    expect(cancel.searchParams.has('token')).toBe(false)
+    expect(cancel.searchParams.get('nonce')).toMatch(/^[a-f0-9-]{36}$/)
+    const again = await page('/api/v1/auth/oauth/github/start?return_to=https://attacker.example')
+    expect(again.text).not.toContain(cancel.searchParams.get('nonce')!)
+    expect(again.text).not.toContain('attacker.example')
+    expect((await request('/auth/me')).status).toBe(401)
+    expect((await request('/auth/login', 'POST', { email: account, password: 'wrong' })).status).toBe(401)
+    const login = await request('/auth/login', 'POST', { email: account, password })
+    expect(login.status).toBe(200)
+    expect((await request('/auth/me', 'GET', undefined, login.data.token)).status).toBe(200)
+    expect((await request('/auth/oauth/github/start', 'POST', {})).status).toBe(404)
+    expect((await request('/auth/oauth/github/callback?code=fake&state=fake')).status).toBe(404)
+    expect((await request('/auth/oauth/qr/start?provider=github', 'POST', {})).status).toBe(404)
+  })
+
+  it('can disable the placeholder without disabling password authentication', async () => {
+    await app.close()
+    await start(password, { androidLoginCompat: false })
+    const result = await request('/auth/oauth/providers')
+    expect(result.status).toBe(200)
+    expect(result.data).toEqual({ items: [] })
+    expect((await request('/auth/oauth/github/start')).status).toBe(404)
+    expect((await request('/auth/login', 'POST', { email: account, password })).status).toBe(200)
+  })
+})
+
 describe('account and device authorization', () => {
   it('separates account, cookie and device credentials; rejects cross-origin requests', async () => {
     expect((await request('/auth/login', 'POST', { email: account, password: 'wrong' })).status).toBe(401)

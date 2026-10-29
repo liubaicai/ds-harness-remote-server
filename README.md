@@ -76,6 +76,12 @@ For development with reload: `pnpm dev` (tsx watch on `src/main.ts`; build the W
 
 Set the same Server URL on your Host and Client, then sign in with the same account. Use an email address as the account name for compatibility with existing clients.
 
+## Android v0.5.22 / v0.5.23 login compatibility
+
+These Android versions hide the password button when a self-hosted server has no OAuth providers. This server enables a discovery-only workaround by default: `/api/v1/auth/oauth/providers` advertises a placeholder GitHub entry, which makes Android display the key/password button. **Tap the key icon and use your existing server account and password.** The GitHub entry is not real OAuth; opening it shows instructions to return to password login. If you open GitHub by mistake, use **Cancel and return to app** on the instructions page to clear the client's pending login; simply pressing Back may leave its buttons disabled. If that link fails, fully close and reopen the app. The link sends only an OAuth cancellation error, never credentials. No third-party service, QR login, OAuth token exchange, or authentication bypass is enabled.
+
+After upgrading to an Android client that fixes the empty-provider login screen, set `DSH_SERVER_ANDROID_LOGIN_COMPAT=0` and restart/recreate the server container. Discovery then returns an empty list; password authentication is unchanged. Server release versions are independent of the upstream Android app versions.
+
 ## Configuration
 
 | Variable | Purpose / default |
@@ -87,6 +93,7 @@ Set the same Server URL on your Host and Client, then sign in with the same acco
 | `DSH_SERVER_PORT` | Default `8080` |
 | `DSH_SERVER_DATA_FILE` | Default `data/state.json`, relative to the working directory |
 | `DSH_SERVER_TRUSTED_PROXIES` | Comma-separated exact proxy IPs/CIDRs; default empty (ignore XFF); trust only controlled proxies |
+| `DSH_SERVER_ANDROID_LOGIN_COMPAT` | Restore Android v0.5.22/23 password entry via placeholder GitHub discovery; default `1`, set `0` to disable |
 | `DSH_SERVER_WEBRTC` | Broker LAN/P2P/TURN instead of Relay only; default `1`, set `0` to force Relay |
 | `DSH_SERVER_STUN_URLS` | Comma-separated STUN URLs; default `stun:stun.miwifi.com:3478,stun:stun.cloudflare.com:3478`, empty disables STUN |
 | `DSH_SERVER_STUN_PROBE` | Probe STUN reachability at startup and try the fastest first; default `1`, set `0` to disable |

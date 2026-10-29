@@ -20,6 +20,8 @@ export interface Config {
   publicUrl: string
   /** Broker WebRTC (LAN / P2P / TURN) signaling instead of Relay-only. Defaults to true. */
   webrtc?: boolean
+  /** Advertise a placeholder GitHub entry to restore Android v0.5.22/23 password login. Defaults to true; not real OAuth. */
+  androidLoginCompat?: boolean
   /** STUN/TURN endpoints handed to peers through `/api/v1/turn/credentials`. */
   ice?: Partial<IceConfig>
   /** Directory holding the built Web UI. Defaults to `../dist/public`. */
@@ -159,6 +161,32 @@ export function createRemoteServer(config: Config) {
       res.end(shell); return
     }
     rate(`api:${clientIp(req)}`, 240)
+    if (method === 'GET' && path === '/api/v1/auth/oauth/providers') {
+      // Android v0.5.22/23 hides even its password button when no known OAuth
+      // provider exists. This entry only reveals that button; it grants no auth.
+      json(res, 200, { items: config.androidLoginCompat === false ? [] : [{
+        id: 'github', displayName: 'Password login compatibility', startUrl: '/api/v1/auth/oauth/github/start',
+      }] }); return
+    }
+    if (method === 'GET' && path === '/api/v1/auth/oauth/github/start' && config.androidLoginCompat !== false) {
+      // Never reflect return_to/redirect/state or issue credentials. Android
+      // leaves password buttons disabled until an OAuth error callback arrives.
+      // A fixed, credential-free cancel link clears that pending state. A fresh
+      // nonce avoids the client's duplicate-URL filter on repeated misclicks.
+      const cancelUrl = `dshremote://oauth?error=password_login_required&nonce=${randomUUID()}`
+      res.writeHead(501, { 'Content-Type': 'text/html; charset=utf-8' })
+      res.end(`<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>请使用账号密码登录 / Use password sign-in</title></head><body><main>
+<h1>请使用账号密码登录</h1>
+<p>这是 Android 登录界面的兼容入口，不提供 GitHub 登录。请先点击下方链接取消登录并返回应用，再点击钥匙图标，输入服务器账号和密码。</p>
+<p><a href="${cancelUrl.replaceAll('&', '&amp;')}">取消并返回应用 / Cancel and return to app</a></p>
+<p>如果无法返回应用或按钮仍不可用，请完全关闭并重新打开应用，然后直接点击钥匙图标。</p>
+<section lang="en"><h2>Use password sign-in</h2>
+<p>This compatibility entry restores the Android password button. GitHub sign-in is not available. Use the link above to cancel and return to the app, then tap the key icon and enter your server account and password.</p>
+<p>If the link does not work or buttons remain disabled, fully close and reopen the app, then tap the key icon directly.</p>
+</section></main></body></html>`); return
+    }
     if (method === 'POST' && path === '/api/v1/auth/login') {
       rate(`login:${clientIp(req)}`, 20)
       const credentials = loginSchema.parse(await body(req))

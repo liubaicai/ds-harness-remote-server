@@ -9,6 +9,8 @@ services:
       DSH_SERVER_ACCOUNT: ${DSH_SERVER_ACCOUNT:?Set DSH_SERVER_ACCOUNT in .env}
       DSH_SERVER_PASSWORD: ${DSH_SERVER_PASSWORD:?Set DSH_SERVER_PASSWORD in .env}
       DSH_SERVER_PUBLIC_URL: ${DSH_SERVER_PUBLIC_URL:-http://localhost:8080}
+      # Restore the password button in Android v0.5.22/23; not real GitHub OAuth.
+      DSH_SERVER_ANDROID_LOGIN_COMPAT: ${DSH_SERVER_ANDROID_LOGIN_COMPAT:-1}
       # WebRTC data plane: LAN -> P2P -> TURN -> Relay. 0 keeps Relay only.
       DSH_SERVER_WEBRTC: ${DSH_SERVER_WEBRTC:-1}
       DSH_SERVER_STUN_URLS: "${DSH_SERVER_STUN_URLS-stun:stun.miwifi.com:3478,stun:stun.cloudflare.com:3478}"
